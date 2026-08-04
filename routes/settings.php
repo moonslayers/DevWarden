@@ -1,7 +1,10 @@
 <?php
 
+use App\Http\Controllers\Settings\AiProviderController;
+use App\Http\Controllers\Settings\BotController;
 use App\Http\Controllers\Settings\ProfileController;
 use App\Http\Controllers\Settings\SecurityController;
+use App\Http\Controllers\Settings\TelegramController;
 use Illuminate\Auth\Middleware\RequirePassword;
 use Illuminate\Support\Facades\Route;
 
@@ -24,4 +27,25 @@ Route::middleware(['auth', 'verified'])->group(function () {
         ->name('user-password.update');
 
     Route::inertia('settings/appearance', 'settings/Appearance')->name('appearance.edit');
+});
+
+// --- T4.1: Telegram settings ---
+Route::middleware(['auth', 'verified'])->group(function () {
+    Route::get('settings/telegram', [TelegramController::class, 'edit'])->name('telegram.edit');
+    Route::patch('settings/telegram', [TelegramController::class, 'update'])->name('telegram.update');
+});
+
+// --- T4.2: AI Providers settings ---
+Route::middleware(['auth', 'verified'])->group(function () {
+    Route::get('settings/providers', [AiProviderController::class, 'index'])->name('providers.index');
+    Route::post('settings/providers', [AiProviderController::class, 'store'])->name('providers.store');
+    Route::patch('settings/providers/{provider}', [AiProviderController::class, 'update'])->name('providers.update');
+    Route::delete('settings/providers/{provider}', [AiProviderController::class, 'destroy'])->name('providers.destroy');
+    Route::post('settings/providers/{provider}/test', [AiProviderController::class, 'test'])->name('providers.test');
+});
+
+// --- T4.3: Bot settings ---
+Route::middleware(['auth', 'verified'])->group(function () {
+    Route::get('settings/bot', [BotController::class, 'edit'])->name('bot.edit');
+    Route::patch('settings/bot', [BotController::class, 'update'])->name('bot.update');
 });
