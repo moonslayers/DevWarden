@@ -60,16 +60,23 @@ class TelegramClient
     }
 
     /**
-     * Send a plain-text message (no parse mode) to the given chat.
+     * Send a message to the given chat.
      *
+     * @param  string|null  $parseMode  Optional parse mode ('HTML', 'Markdown', etc.).
      * @return array<string, mixed> The Telegram "Message" result payload.
      */
-    public function sendMessage(int|string $chatId, string $text): array
+    public function sendMessage(int|string $chatId, string $text, ?string $parseMode = null): array
     {
-        return (array) $this->request('sendMessage', [
+        $params = [
             'chat_id' => $chatId,
             'text' => $text,
-        ]);
+        ];
+
+        if ($parseMode !== null) {
+            $params['parse_mode'] = $parseMode;
+        }
+
+        return (array) $this->request('sendMessage', $params);
     }
 
     /**
@@ -83,6 +90,27 @@ class TelegramClient
     }
 
     /**
+     * Send a local image file as a photo message to the given chat.
+     *
+     * The file is uploaded via multipart/form-data, not JSON.
+     *
+     * @return array<string, mixed> The Telegram "Message" result payload.
+     */
+    public function sendPhoto(int|string $chatId, string $photoPath, ?string $caption = null): array
+    {
+        $multipart = [
+            ['name' => 'chat_id', 'contents' => (string) $chatId],
+            ['name' => 'photo', 'contents' => fopen($photoPath, 'r')],
+        ];
+
+        if ($caption !== null && $caption !== '') {
+            $multipart[] = ['name' => 'caption', 'contents' => $caption];
+        }
+
+        return (array) $this->requestMultipart('sendPhoto', $multipart);
+    }
+
+    /**
      * @param  array<string, mixed>  $params
      * @return mixed The Telegram result payload (array, bool, etc.).
      *
@@ -90,8 +118,30 @@ class TelegramClient
      */
     private function request(string $method, array $params): mixed
     {
+        return $this->send($method, ['json' => $params]);
+    }
+
+    /**
+     * @param  array<int, array{name: string, contents: mixed}>  $multipart
+     * @return mixed The Telegram result payload (array, bool, etc.).
+     *
+     * @throws TelegramApiException
+     */
+    private function requestMultipart(string $method, array $multipart): mixed
+    {
+        return $this->send($method, ['multipart' => $multipart]);
+    }
+
+    /**
+     * @param  array<string, mixed>  $options
+     * @return mixed The Telegram result payload (array, bool, etc.).
+     *
+     * @throws TelegramApiException
+     */
+    private function send(string $method, array $options): mixed
+    {
         try {
-            $response = $this->http->request('POST', $this->endpoint($method), ['json' => $params]);
+            $response = $this->http->request('POST', $this->endpoint($method), $options);
         } catch (GuzzleException $e) {
             throw new TelegramApiException("Telegram API request '{$method}' failed.", 0, $e);
         }

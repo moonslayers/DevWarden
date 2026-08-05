@@ -108,6 +108,24 @@ test('sendMessage posts to the bot endpoint with the expected chat and plain-tex
     expect($result)->toBe(['message_id' => 43, 'text' => 'Ok']);
 });
 
+test('sendMessage includes parse_mode in the body when one is provided', function () {
+    $container = [];
+    $client = telegramClientWithMock([
+        json_encode(['ok' => true, 'result' => ['message_id' => 44, 'text' => 'Ok']]),
+    ], $container);
+
+    $result = $client->sendMessage(123456789, 'Respuesta con <b>tags</b>', 'HTML');
+
+    $sent = json_decode((string) $container[0]['request']->getBody(), true);
+
+    expect($sent)->toBe([
+        'chat_id' => 123456789,
+        'text' => 'Respuesta con <b>tags</b>',
+        'parse_mode' => 'HTML',
+    ]);
+    expect($result)->toBe(['message_id' => 44, 'text' => 'Ok']);
+});
+
 test('setMyCommands sends the expected commands payload', function () {
     $container = [];
     $client = telegramClientWithMock([
@@ -126,6 +144,75 @@ test('setMyCommands sends the expected commands payload', function () {
         ['command' => 'help', 'description' => 'Ayuda'],
     ]]);
     expect($result)->toBeTrue();
+});
+
+test('sendPhoto uploads a local photo as multipart/form-data with a caption', function () {
+    $container = [];
+    $client = telegramClientWithMock([
+        json_encode(['ok' => true, 'result' => ['message_id' => 50, 'photo' => []]]),
+    ], $container);
+
+    $photoPath = tempnam(sys_get_temp_dir(), 'dw-photo-');
+    file_put_contents($photoPath, "\x89PNG\r\n\x1a\n-fake-photo-bytes-");
+
+    try {
+        $result = $client->sendPhoto(123456789, $photoPath, 'Mira esto');
+    } finally {
+        unlink($photoPath);
+    }
+
+    $request = $container[0]['request'];
+
+    expect((string) $request->getUri())->toEndWith('/sendPhoto');
+    expect((string) $request->getHeaderLine('Content-Type'))->toContain('multipart/form-data');
+
+    $body = (string) $request->getBody();
+    expect($body)->toContain('name="chat_id"');
+    expect($body)->toContain('123456789');
+    expect($body)->toContain('name="photo"');
+    expect($body)->toContain("\x89PNG\r\n\x1a\n-fake-photo-bytes-");
+    expect($body)->toContain('name="caption"');
+    expect($body)->toContain('Mira esto');
+    expect($result)->toBe(['message_id' => 50, 'photo' => []]);
+});
+
+test('sendPhoto omits the caption field when none is provided', function () {
+    $container = [];
+    $client = telegramClientWithMock([
+        json_encode(['ok' => true, 'result' => ['message_id' => 51, 'photo' => []]]),
+    ], $container);
+
+    $photoPath = tempnam(sys_get_temp_dir(), 'dw-photo-');
+    file_put_contents($photoPath, "\x89PNG\r\n\x1a\n");
+
+    try {
+        $result = $client->sendPhoto(123456789, $photoPath);
+    } finally {
+        unlink($photoPath);
+    }
+
+    $body = (string) $container[0]['request']->getBody();
+
+    expect($body)->toContain('name="photo"');
+    expect($body)->not->toContain('name="caption"');
+    expect($result)->toBe(['message_id' => 51, 'photo' => []]);
+});
+
+test('sendPhoto throws TelegramApiException on a non-ok payload', function () {
+    $container = [];
+    $client = telegramClientWithMock([
+        json_encode(['ok' => false, 'error_code' => 400, 'description' => 'Bad Request: PHOTO_INVALID_DIMENSIONS']),
+    ], $container);
+
+    $photoPath = tempnam(sys_get_temp_dir(), 'dw-photo-');
+    file_put_contents($photoPath, 'bytes');
+
+    try {
+        expect(fn () => $client->sendPhoto(123456789, $photoPath))
+            ->toThrow(TelegramApiException::class, 'Telegram API request \'sendPhoto\' failed: Bad Request: PHOTO_INVALID_DIMENSIONS');
+    } finally {
+        unlink($photoPath);
+    }
 });
 
 test('an error payload throws TelegramApiException', function () {

@@ -10,3 +10,6 @@ tests/Pest.php imports but does NOT apply `->use(RefreshDatabase::class)`, so an
 
 ## Global RefreshDatabase is now active in tests/Pest.php (supersedes older guidance)
 The global `->use(RefreshDatabase::class)` in tests/Pest.php was previously commented out (starter-kit bug), causing "no such table: users" across pre-existing tests. It has been restored and the full suite passes. Any new Feature test that touches the DB is covered automatically — do NOT comment it out again. Per-file `uses(RefreshDatabase::class)` in older feature tests is redundant but harmless; new tests do not need it.
+
+## Unit tests must declare uses(TestCase::class) to use facades/container
+tests/Pest.php only binds Tests\TestCase (and RefreshDatabase) to in('Feature'). Tests under tests/Unit are plain PHPUnit by default, so app(), Http::fake() and other facades fail with "facade root has not been set". Add `use Tests\TestCase;` + `uses(TestCase::class);` at the top of each Unit test file that touches the container or facades. AI tool tests use Http::fake() + new Request([...]) and never hit real network (the Request class constructor takes the args array).

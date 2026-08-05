@@ -2,6 +2,11 @@
 
 namespace App\Ai\Agents;
 
+use App\Ai\Tools\CurrentDateTool;
+use App\Ai\Tools\DownloadImageTool;
+use App\Ai\Tools\DuckDuckGoImageSearchTool;
+use App\Ai\Tools\DuckDuckGoSearchTool;
+use App\Ai\Tools\FetchWebPageTool;
 use App\Models\BotSetting;
 use App\Models\TelegramChatConversation;
 use App\Models\User;
@@ -9,6 +14,7 @@ use App\Services\AiConfigSyncer;
 use Laravel\Ai\Concerns\RemembersConversations;
 use Laravel\Ai\Contracts\Agent;
 use Laravel\Ai\Contracts\Conversational;
+use Laravel\Ai\Contracts\HasTools;
 use Laravel\Ai\Promptable;
 
 /**
@@ -18,7 +24,7 @@ use Laravel\Ai\Promptable;
  * conversation for the owner user and its ID is persisted in
  * TelegramChatConversation, later messages resume it with the stored ID.
  */
-class BotAgent implements Agent, Conversational
+class BotAgent implements Agent, Conversational, HasTools
 {
     use Promptable, RemembersConversations;
 
@@ -35,6 +41,22 @@ class BotAgent implements Agent, Conversational
     public function instructions(): string
     {
         return BotSetting::singleton()->system_prompt ?: self::DEFAULT_INSTRUCTIONS;
+    }
+
+    /**
+     * The tools available to the agent.
+     *
+     * @return array<Tool|ProviderTool>
+     */
+    public function tools(): iterable
+    {
+        return [
+            new CurrentDateTool,
+            new DuckDuckGoSearchTool,
+            new FetchWebPageTool,
+            new DuckDuckGoImageSearchTool,
+            new DownloadImageTool,
+        ];
     }
 
     /**

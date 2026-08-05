@@ -446,26 +446,6 @@ use Laravel\AI\Agent;
 
 Calling a capability not supported by a provider throws a `LogicException`. Refer to the provider support table below.
 
-### AiManager caches providers per process (runtime config gotcha)
-
-The SDK reads provider credentials from `config('ai.providers.<name>')` at provider-resolve time, but the `AiManager` singleton caches resolved provider instances and providers capture config at construction. For runtime/DB-driven credentials in a long-running queue worker you must set the config values and then forget the cached instance by provider name before each AI call, so the SDK re-resolves with the new config:
-
-```php
-use Laravel\Ai\AiManager;
-
-// 1. Write the credentials the SDK reads at resolve time
-config(['ai.providers.openai' => ['driver' => 'openai', 'key' => $key]]);
-
-// 2. Clear the cached provider instance held by the AiManager singleton
-//    (manager-level, by provider NAME — not container-level)
-app(AiManager::class)->forgetInstance('openai');
-
-// 3. Now the next SDK call re-reads config('ai.providers.openai')
-$response = agent()->prompt('Hello', provider: 'openai');
-```
-
-Avoid container-level `forgetInstance(AiManager::class)` without also clearing the facade (`Ai::clearResolvedInstance()`). Prefer the manager-level per-provider `forgetInstance($name)` so unaffected providers keep their cached instances.
-
 ## Provider Support
 
 | Feature    | Providers                                                       |
