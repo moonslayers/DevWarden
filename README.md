@@ -48,10 +48,10 @@ php artisan migrate
 npm install
 npm run build
 
-php artisan serve
+php artisan serve --port=8012
 ```
 
-Abre http://localhost:8000 en tu navegador.
+Abre http://localhost:8012 en tu navegador.
 
 ## Stage 1: Bot de Telegram
 
@@ -67,7 +67,7 @@ composer run dev:full
 Equivale a abrir tres terminales en la raíz del proyecto:
 
 ```bash
-php artisan serve          # web UI en http://localhost:8000
+php artisan serve --port=8012  # web UI en http://localhost:8012
 php artisan schedule:work  # ejecuta el scheduler (long polling cada minuto)
 php artisan queue:work     # procesa los jobs de respuesta
 ```

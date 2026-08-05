@@ -4,7 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # Run the whole app + Telegram bot locally in one terminal:
-#   php artisan serve          -> web UI (http://localhost:8000)
+#   php artisan serve          -> web UI (http://localhost:8012)
 #   php artisan schedule:work  -> runs the long-polling schedule (telegram:poll every minute)
 #   php artisan queue:work     -> processes ProcessTelegramUpdate jobs
 #
@@ -20,7 +20,7 @@ cleanup() {
 trap cleanup INT TERM EXIT
 
 echo "Starting DevWarden (web + scheduler + queue). Ctrl+C to stop all."
-"php" artisan serve &
+"php" artisan serve --port=8012 &
 "php" artisan schedule:work &
 "php" artisan queue:work &
 
