@@ -1,6 +1,6 @@
 ---
 name: devwarden-dashboard
-description: TRIGGER when working on DevWarden's dashboard — the Inertia page at GET /dashboard, its health/activity/usage props contract (tested with AssertableInertia), chart.js KPI charts (StatChart + useChartPalette), the SQLite json_extract aggregations over laravel/ai usage data, or DashboardController::bucketDaily(). Load when touching KPIs, bot stats queries, or the dashboard Vue frontend.
+description: TRIGGER when working on DevWarden's dashboard — the Inertia page at GET /dashboard, its health/activity/usage props contract (tested with AssertableInertia), chart.js KPI charts (StatChart + useChartPalette), the SQLite json_extract aggregations over laravel/ai usage data, the daily time-series bucketing shared via App\Services\TimeSeriesService, or DashboardController::bucketDaily(). Load when touching KPIs, bot stats queries, or the dashboard Vue frontend.
 license: MIT
 metadata:
   author: devwarden
@@ -42,9 +42,13 @@ Totals and per-provider/model breakdowns are computed entirely in SQL with SQLit
 - Breakdowns: `COALESCE(JSON_EXTRACT(meta, '$.provider'), 'unknown')` grouped, ordered by `(prompt_tokens + completion_tokens) DESC`. Missing meta coalesces to `'unknown'`.
 - Daily series (`tokens_by_day` / `messages_by_day`) window to 14 days: `created_at >= Carbon::today()->subDays(13)`.
 
-## DashboardController::bucketDaily()
+## Daily time-series bucketing (TimeSeriesService)
 
-Public static helper that groups a Collection into daily series of N days ending today, zero-filling gaps. Signature: `bucketDaily(Collection $items, string $dateField, callable $extractor, int $days = 14, array $seriesKeys = [])`. Returns `['labels' => ...]` plus one int series per key. Items outside the window are dropped; series not present in `seriesKeys` are created implicitly from extractor keys. Unit-tested in `tests/Unit/DashboardBucketingTest.php`.
+The daily-series logic lives in **`app/Services/TimeSeriesService.php`** (`bucketDaily()`), shared by the dashboard AND `SubAgentController` (the sub-agents page's `invocationsLast14d`/`tokensLast14d` use it). `DashboardController::bucketDaily()` is now a thin static wrapper that just forwards to `app(TimeSeriesService::class)->bucketDaily(...)` — keep it as the entry point (dashboard code calls it via `static::bucketDaily(...)`), but do NOT reimplement the algorithm there.
+
+Signature: `bucketDaily(Collection $items, string $dateField, callable $extractor, int $days = 14, array $seriesKeys = [])`. Returns `['labels' => ...]` plus one int series per key. Items outside the window are dropped; series not present in `seriesKeys` are created implicitly from extractor keys. Unit-tested in `tests/Unit/DashboardBucketingTest.php` (the service itself has no dedicated test — the bucketing behavior is covered there and via `SubAgentPageTest`).
+
+Daily-bucket aggregation is timezone-sensitive: `bucketDaily()` parses `created_at` with `Carbon::parse()` in the app timezone (`config('app.timezone')`, set via `APP_TIMEZONE` in `.env`, currently `America/Los_Angeles`). Changing `APP_TIMEZONE` shifts daily bucket labels and mixes historical UTC rows with new local-time rows — a deliberate dev-time tradeoff.
 
 ## Chart.js setup
 
@@ -59,4 +63,4 @@ The CSS vars in `resources/css/app.css` (`--chart-1` … `--chart-5`, plus dark-
 
 ## When to use me
 
-Load this skill when touching the dashboard page, KPI cards, chart.js charts, bot stats/token queries, the health/activity/usage props contract, or `bucketDaily()`. Also load before changing anything in `DashboardController` or the dashboard Vue files to stay consistent with the tested contract.
+Load this skill when touching the dashboard page, KPI cards, chart.js charts, bot stats/token queries, the health/activity/usage props contract, `bucketDaily()`, or the shared `TimeSeriesService` bucketing. Also load before changing anything in `DashboardController` or the dashboard Vue files to stay consistent with the tested contract.

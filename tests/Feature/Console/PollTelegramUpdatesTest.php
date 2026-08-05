@@ -1,8 +1,10 @@
 <?php
 
-use App\Jobs\ProcessTelegramUpdate;
+use App\Jobs\ProcessTelegramPendingBatch;
+use App\Models\TelegramPendingMessage;
 use App\Models\TelegramSetting;
 use App\Services\Telegram\TelegramClient;
+use App\Services\Telegram\TelegramMessageBuffer;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Queue;
 
@@ -13,7 +15,7 @@ uses(RefreshDatabase::class);
 /**
  * Bind a fake TelegramClient that returns the given updates.
  *
- * @param  array<int, array{update_id: int, chat_id?: int|string, text?: string}>  $updates
+ * @param  array<int, array{update_id: int, chat_id?: int|string, message_id?: int, text?: string, photo?: string, edit?: bool}>  $updates
  */
 function fakeTelegramClient(array $updates): object
 {
@@ -37,9 +39,10 @@ test('does nothing and enqueues nothing when polling is disabled', function () {
     $this->artisan('telegram:poll')->assertSuccessful();
 
     Queue::assertNothingPushed();
+    expect(TelegramPendingMessage::query()->count())->toBe(0);
 });
 
-test('dispatches a job for an authorized text update and persists the offset', function () {
+test('buffers an authorized text update and arms exactly one debounced batch job', function () {
     Queue::fake();
 
     TelegramSetting::factory()->create([
@@ -50,15 +53,155 @@ test('dispatches a job for an authorized text update and persists the offset', f
 
     $telegram = mock(TelegramClient::class);
     $telegram->shouldReceive('getUpdates')->with(101, 50)->andReturn([
-        ['update_id' => 101, 'chat_id' => 123456789, 'text' => 'Hola bot'],
+        ['update_id' => 101, 'chat_id' => 123456789, 'message_id' => 1, 'text' => 'Hola bot'],
     ]);
     app()->instance(TelegramClient::class, $telegram);
 
     $this->artisan('telegram:poll')->assertSuccessful();
 
-    Queue::assertPushed(ProcessTelegramUpdate::class, fn ($job): bool => $job->chatId === 123456789 && $job->text === 'Hola bot');
+    expect(TelegramPendingMessage::query()->count())->toBe(1);
+
+    $message = TelegramPendingMessage::query()->first();
+
+    expect($message->chat_id)->toBe(123456789);
+    expect($message->message_id)->toBe(1);
+    expect($message->text)->toBe('Hola bot');
+    expect($message->update_id)->toBe(101);
+    expect($message->is_edit)->toBeFalse();
+    expect($message->photo_file_id)->toBeNull();
+
+    Queue::assertPushed(ProcessTelegramPendingBatch::class, 1);
+    Queue::assertPushed(ProcessTelegramPendingBatch::class, fn ($job): bool => $job->chatId === 123456789);
 
     expect(TelegramSetting::singleton()->last_update_id)->toBe(101);
+});
+
+test('buffers an authorized photo update with caption as text plus the photo file_id', function () {
+    Queue::fake();
+
+    TelegramSetting::factory()->create([
+        'id' => 1,
+        'allowed_user_ids' => [123456789],
+        'last_update_id' => 100,
+    ]);
+
+    fakeTelegramClient([
+        ['update_id' => 101, 'chat_id' => 123456789, 'message_id' => 1, 'text' => 'Mira mi foto', 'photo' => 'file-id-123'],
+    ]);
+
+    $this->artisan('telegram:poll')->assertSuccessful();
+
+    expect(TelegramPendingMessage::query()->count())->toBe(1);
+
+    $message = TelegramPendingMessage::query()->first();
+
+    expect($message->text)->toBe('Mira mi foto');
+    expect($message->photo_file_id)->toBe('file-id-123');
+    expect($message->message_id)->toBe(1);
+
+    Queue::assertPushed(ProcessTelegramPendingBatch::class, 1);
+    expect(TelegramSetting::singleton()->last_update_id)->toBe(101);
+});
+
+test('buffers an authorized photo update without caption with empty text plus the photo file_id', function () {
+    Queue::fake();
+
+    TelegramSetting::factory()->create([
+        'id' => 1,
+        'allowed_user_ids' => [123456789],
+        'last_update_id' => 100,
+    ]);
+
+    fakeTelegramClient([
+        ['update_id' => 101, 'chat_id' => 123456789, 'message_id' => 1, 'photo' => 'file-id-456'],
+    ]);
+
+    $this->artisan('telegram:poll')->assertSuccessful();
+
+    expect(TelegramPendingMessage::query()->count())->toBe(1);
+
+    $message = TelegramPendingMessage::query()->first();
+
+    expect($message->text)->toBe('');
+    expect($message->photo_file_id)->toBe('file-id-456');
+
+    Queue::assertPushed(ProcessTelegramPendingBatch::class, 1);
+    expect(TelegramSetting::singleton()->last_update_id)->toBe(101);
+});
+
+test('discards an authorized update that is neither text nor photo but still advances the offset', function () {
+    Queue::fake();
+
+    TelegramSetting::factory()->create([
+        'id' => 1,
+        'allowed_user_ids' => [123456789],
+        'last_update_id' => 100,
+    ]);
+
+    fakeTelegramClient([
+        ['update_id' => 101, 'chat_id' => 123456789, 'message_id' => 1],
+    ]);
+
+    $this->artisan('telegram:poll')->assertSuccessful();
+
+    expect(TelegramPendingMessage::query()->count())->toBe(0);
+
+    Queue::assertNothingPushed();
+    expect(TelegramSetting::singleton()->last_update_id)->toBe(101);
+});
+
+test('coalesces two messages of the same chat into a single batch job', function () {
+    Queue::fake();
+
+    TelegramSetting::factory()->create([
+        'id' => 1,
+        'allowed_user_ids' => [123456789],
+        'last_update_id' => 100,
+    ]);
+
+    fakeTelegramClient([
+        ['update_id' => 101, 'chat_id' => 123456789, 'message_id' => 1, 'text' => 'Uno'],
+        ['update_id' => 102, 'chat_id' => 123456789, 'message_id' => 2, 'text' => 'Dos'],
+    ]);
+
+    $this->artisan('telegram:poll')->assertSuccessful();
+
+    expect(TelegramPendingMessage::query()->count())->toBe(2);
+    expect(TelegramPendingMessage::query()->where('chat_id', 123456789)->pluck('text')->all())->toBe(['Uno', 'Dos']);
+
+    Queue::assertPushed(ProcessTelegramPendingBatch::class, 1);
+    Queue::assertPushed(ProcessTelegramPendingBatch::class, fn ($job): bool => $job->chatId === 123456789);
+});
+
+test('upserts an authorized edited message in place and arms one batch job', function () {
+    Queue::fake();
+
+    TelegramSetting::factory()->create([
+        'id' => 1,
+        'allowed_user_ids' => [123456789],
+        'last_update_id' => 100,
+    ]);
+
+    app(TelegramMessageBuffer::class)->storeMessage(123456789, 1, 'Hola bot', 101);
+
+    fakeTelegramClient([
+        ['update_id' => 102, 'chat_id' => 123456789, 'message_id' => 1, 'text' => 'Hola bot, corregido', 'edit' => true],
+    ]);
+
+    $this->artisan('telegram:poll')->assertSuccessful();
+
+    expect(TelegramPendingMessage::query()->count())->toBe(1);
+
+    $message = TelegramPendingMessage::query()->first();
+
+    expect($message->text)->toBe('Hola bot, corregido');
+    expect($message->update_id)->toBe(102);
+    expect($message->is_edit)->toBeTrue();
+
+    Queue::assertPushed(ProcessTelegramPendingBatch::class, 1);
+    Queue::assertPushed(ProcessTelegramPendingBatch::class, fn ($job): bool => $job->chatId === 123456789);
+
+    expect(TelegramSetting::singleton()->last_update_id)->toBe(102);
 });
 
 test('discards unauthorized and non-text updates but still advances the offset', function () {
@@ -71,15 +214,17 @@ test('discards unauthorized and non-text updates but still advances the offset',
     ]);
 
     fakeTelegramClient([
-        ['update_id' => 201, 'chat_id' => 999999, 'text' => 'No autorizado'],
+        ['update_id' => 201, 'chat_id' => 999999, 'message_id' => 1, 'text' => 'No autorizado'],
         ['update_id' => 202],
-        ['update_id' => 203, 'chat_id' => 123456789, 'text' => 'Autorizado'],
+        ['update_id' => 203, 'chat_id' => 123456789, 'message_id' => 2, 'text' => 'Autorizado'],
     ]);
 
     $this->artisan('telegram:poll')->assertSuccessful();
 
-    Queue::assertPushed(ProcessTelegramUpdate::class, fn ($job): bool => $job->chatId === 123456789 && $job->text === 'Autorizado');
-    expect(Queue::pushed(ProcessTelegramUpdate::class))->toHaveCount(1);
+    expect(TelegramPendingMessage::query()->count())->toBe(1);
+    expect(TelegramPendingMessage::query()->first()->text)->toBe('Autorizado');
+
+    Queue::assertPushed(ProcessTelegramPendingBatch::class, 1);
 
     expect(TelegramSetting::singleton()->last_update_id)->toBe(203);
 });
@@ -94,9 +239,10 @@ test('exits gracefully with a warning when the bot token is not configured', fun
         ->assertSuccessful();
 
     Queue::assertNothingPushed();
+    expect(TelegramPendingMessage::query()->count())->toBe(0);
 });
 
-test('dispatches every authorized text update and stores the highest update id', function () {
+test('dispatches one batch job per affected chat and stores the highest update id', function () {
     Queue::fake();
 
     TelegramSetting::factory()->create([
@@ -106,16 +252,18 @@ test('dispatches every authorized text update and stores the highest update id',
     ]);
 
     fakeTelegramClient([
-        ['update_id' => 501, 'chat_id' => 123, 'text' => 'Uno'],
-        ['update_id' => 502, 'chat_id' => 789, 'text' => 'No'],
-        ['update_id' => 503, 'chat_id' => 456, 'text' => 'Dos'],
+        ['update_id' => 501, 'chat_id' => 123, 'message_id' => 1, 'text' => 'Uno'],
+        ['update_id' => 502, 'chat_id' => 789, 'message_id' => 1, 'text' => 'No'],
+        ['update_id' => 503, 'chat_id' => 456, 'message_id' => 1, 'text' => 'Dos'],
     ]);
 
     $this->artisan('telegram:poll')->assertSuccessful();
 
-    Queue::assertPushed(ProcessTelegramUpdate::class, fn ($job): bool => $job->chatId === 123 && $job->text === 'Uno');
-    Queue::assertPushed(ProcessTelegramUpdate::class, fn ($job): bool => $job->chatId === 456 && $job->text === 'Dos');
-    expect(Queue::pushed(ProcessTelegramUpdate::class))->toHaveCount(2);
+    expect(TelegramPendingMessage::query()->count())->toBe(2);
+
+    Queue::assertPushed(ProcessTelegramPendingBatch::class, 2);
+    Queue::assertPushed(ProcessTelegramPendingBatch::class, fn ($job): bool => $job->chatId === 123);
+    Queue::assertPushed(ProcessTelegramPendingBatch::class, fn ($job): bool => $job->chatId === 456);
 
     expect(TelegramSetting::singleton()->last_update_id)->toBe(503);
 });

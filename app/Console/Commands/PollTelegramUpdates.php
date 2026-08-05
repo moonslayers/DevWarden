@@ -2,18 +2,18 @@
 
 namespace App\Console\Commands;
 
-use App\Jobs\ProcessTelegramUpdate;
 use App\Models\TelegramSetting;
 use App\Services\Telegram\Exceptions\TelegramApiException;
 use App\Services\Telegram\Exceptions\TelegramNotConfiguredException;
 use App\Services\Telegram\TelegramClient;
+use App\Services\Telegram\TelegramMessageBuffer;
 use Illuminate\Console\Attributes\Description;
 use Illuminate\Console\Attributes\Signature;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Log;
 
 #[Signature('telegram:poll')]
-#[Description('Poll Telegram for new updates and enqueue authorized text messages')]
+#[Description('Poll Telegram for new updates and buffer authorized text messages')]
 class PollTelegramUpdates extends Command
 {
     /**
@@ -52,33 +52,45 @@ class PollTelegramUpdates extends Command
 
         $allowedChats = array_map('intval', $settings->allowed_user_ids ?? []);
         $lastUpdateId = (int) $settings->last_update_id;
-        $dispatched = 0;
+        $buffer = app(TelegramMessageBuffer::class);
+        $affectedChats = [];
+        $buffered = 0;
 
         foreach ($updates as $update) {
             $lastUpdateId = max($lastUpdateId, (int) $update['update_id']);
 
             $chatId = $update['chat_id'] ?? null;
+            $messageId = $update['message_id'] ?? null;
             $text = $update['text'] ?? null;
+            $photo = $update['photo'] ?? null;
+            $isEdit = (bool) ($update['edit'] ?? false);
 
-            // Unauthorized chats and non-text updates are discarded silently,
-            // but their offset is still advanced so they never re-deliver.
-            if ($chatId === null || $text === null || ! in_array((int) $chatId, $allowedChats, true)) {
+            // Unauthorized chats, non-text/non-photo updates and updates without
+            // a message id are discarded silently, but their offset is still
+            // advanced so they never re-deliver.
+            if ($chatId === null || $messageId === null || ($text === null && $photo === null) || ! in_array((int) $chatId, $allowedChats, true)) {
                 continue;
             }
 
-            ProcessTelegramUpdate::dispatch((int) $chatId, $text);
+            $buffer->storeMessage((int) $chatId, $messageId, $text ?? '', (int) $update['update_id'], $isEdit, $photo);
 
-            $dispatched++;
+            $affectedChats[(int) $chatId] = true;
+            $buffered++;
         }
 
-        // Jobs are dispatched before the offset is persisted: a crash in
-        // between re-delivers the batch on the next poll (at-least-once)
-        // instead of losing updates.
+        // Debounced batch jobs are armed before the offset is persisted: a crash
+        // in between re-delivers the buffered batch on the next poll
+        // (at-least-once) instead of losing updates, and the buffer upsert is
+        // idempotent.
+        foreach (array_keys($affectedChats) as $chatId) {
+            $buffer->scheduleIfNeeded($chatId);
+        }
+
         if ($lastUpdateId > (int) $settings->last_update_id) {
             $settings->forceFill(['last_update_id' => $lastUpdateId])->save();
         }
 
-        $this->components->info(sprintf('Polled %d update(s); dispatched %d job(s).', count($updates), $dispatched));
+        $this->components->info(sprintf('Polled %d update(s); buffered %d message(s) into %d chat(s).', count($updates), $buffered, count($affectedChats)));
 
         return self::SUCCESS;
     }

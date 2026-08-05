@@ -4,6 +4,7 @@ use App\Http\Controllers\Settings\AiProviderController;
 use App\Http\Controllers\Settings\BotController;
 use App\Http\Controllers\Settings\ProfileController;
 use App\Http\Controllers\Settings\SecurityController;
+use App\Http\Controllers\Settings\SkillController;
 use App\Http\Controllers\Settings\TelegramController;
 use Illuminate\Auth\Middleware\RequirePassword;
 use Illuminate\Support\Facades\Route;
@@ -48,4 +49,12 @@ Route::middleware(['auth', 'verified'])->group(function () {
 Route::middleware(['auth', 'verified'])->group(function () {
     Route::get('settings/bot', [BotController::class, 'edit'])->name('bot.edit');
     Route::patch('settings/bot', [BotController::class, 'update'])->name('bot.update');
+});
+
+// --- Skills settings ---
+Route::middleware(['auth', 'verified'])->group(function () {
+    Route::get('settings/skills', [SkillController::class, 'index'])->name('settings.skills.index');
+    Route::post('settings/skills', [SkillController::class, 'store'])->name('settings.skills.store');
+    Route::patch('settings/skills/{skill}', [SkillController::class, 'update'])->name('settings.skills.update');
+    Route::delete('settings/skills/{skill}', [SkillController::class, 'destroy'])->name('settings.skills.destroy');
 });

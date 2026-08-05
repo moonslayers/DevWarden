@@ -19,6 +19,13 @@ return Application::configure(basePath: dirname(__DIR__))
         $schedule->command('telegram:poll')
             ->everyMinute()
             ->withoutOverlapping(10);
+
+        $schedule->command('opencode:monitor')
+            ->everyMinute()
+            ->withoutOverlapping(10);
+
+        $schedule->command('subagents:prune-usage')
+            ->daily();
     })
     ->withMiddleware(function (Middleware $middleware): void {
         $middleware->encryptCookies(except: ['appearance', 'sidebar_state']);

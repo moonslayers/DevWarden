@@ -2,6 +2,9 @@
 
 namespace App\Providers;
 
+use App\Services\Embedding\EmbeddingService;
+use App\Services\Embedding\LocalEmbeddingService;
+use App\Services\Opencode\OpencodeSessionManager;
 use Carbon\CarbonImmutable;
 use Illuminate\Support\Facades\Date;
 use Illuminate\Support\Facades\DB;
@@ -15,7 +18,11 @@ class AppServiceProvider extends ServiceProvider
      */
     public function register(): void
     {
-        //
+        // A single shared MCP client across every opencode tool call of a prompt.
+        $this->app->singleton(OpencodeSessionManager::class);
+
+        // A single shared in-process pipeline so the ONNX model is loaded only once.
+        $this->app->singleton(EmbeddingService::class, LocalEmbeddingService::class);
     }
 
     /**

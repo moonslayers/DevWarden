@@ -21,6 +21,11 @@ Asistente de desarrollo personal. DevWarden es una aplicación web que te permit
 - Composer
 - Node.js + npm
 - SQLite
+- Extensión PHP **FFI** habilitada (requerida por la memoria del bot: embeddings locales con codewithkyrian/transformers)
+
+En Linux, habilita `extension=ffi` en tu `php.ini` (descomenta la línea `;extension=ffi`)
+o ejecuta `sudo sed -i 's/^;extension=ffi$/extension=ffi/' /etc/php/php.ini`. La primera vez
+que el bot genera un embedding se descarga el modelo (~133 MB) a `storage/app/embedding-models`.
 
 ## Instalación local
 
@@ -69,10 +74,12 @@ Equivale a abrir tres terminales en la raíz del proyecto:
 ```bash
 php artisan serve --port=8012  # web UI en http://localhost:8012
 php artisan schedule:work  # ejecuta el scheduler (long polling cada minuto)
-php artisan queue:work     # procesa los jobs de respuesta
+php -d extension=ffi artisan queue:work   # procesa los jobs de respuesta (FFI para embeddings locales)
 ```
 
-Requiere `QUEUE_CONNECTION=database` en `.env` (es el valor por defecto del proyecto).
+Requiere `QUEUE_CONNECTION=database` en `.env` (es el valor por defecto del proyecto). El
+worker de cola debe correr con FFI habilitada (`php -d extension=ffi artisan queue:work`)
+para la feature de memoria con embeddings locales del bot; `composer run dev:full` ya lo hace.
 
 ### Configuración inicial desde la web UI
 
@@ -115,7 +122,7 @@ habilitados en orden y saltará al siguiente si uno falla.
 | Backend | Laravel 13 (PHP 8.5) |
 | Frontend | Inertia.js v3 + Vue 3 + Tailwind CSS 4 (Vite) |
 | Auth | Laravel Fortify |
-| IA | laravel/ai (agentes, generación de texto, failover entre proveedores) |
+| IA | laravel/ai (agentes, generación de texto, failover entre proveedores) + codewithkyrian/transformers (embeddings locales) |
 | Base de datos | SQLite |
 | Colas | Database driver |
 | Testing | Pest 5, Laravel Pint, PHPStan (larastan) |

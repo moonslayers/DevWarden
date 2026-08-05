@@ -6,26 +6,37 @@ use App\Ai\Tools\DownloadImageTool;
 use App\Ai\Tools\DuckDuckGoImageSearchTool;
 use App\Ai\Tools\DuckDuckGoSearchTool;
 use App\Ai\Tools\FetchWebPageTool;
+use App\Ai\Tools\Opencode\OpencodeAdvanceWorkflowTool;
+use App\Ai\Tools\Opencode\OpencodeAskTool;
+use App\Ai\Tools\Opencode\OpencodeStartWorkflowTool;
+use App\Ai\Tools\Opencode\OpencodeStopWorkflowTool;
+use App\Ai\Tools\Opencode\OpencodeWorkflowStatusTool;
+use Illuminate\Foundation\Testing\RefreshDatabase;
 use Laravel\Ai\Contracts\HasTools;
 use Laravel\Ai\Contracts\Tool;
 use Tests\TestCase;
 
-uses(TestCase::class);
+uses(TestCase::class, RefreshDatabase::class);
 
 test('BotAgent implements the HasTools contract', function () {
     expect(BotAgent::class)->toImplement(HasTools::class);
 });
 
-test('tools returns the five AI tools available to the agent', function () {
+test('tools returns the ten AI tools available to the agent', function () {
     $tools = iterator_to_array(app(BotAgent::class)->tools());
 
-    expect($tools)->toHaveCount(5)
+    expect($tools)->toHaveCount(10)
         ->and(array_map(fn ($tool): string => $tool::class, $tools))->toBe([
             CurrentDateTool::class,
             DuckDuckGoSearchTool::class,
             FetchWebPageTool::class,
             DuckDuckGoImageSearchTool::class,
             DownloadImageTool::class,
+            OpencodeStartWorkflowTool::class,
+            OpencodeAdvanceWorkflowTool::class,
+            OpencodeWorkflowStatusTool::class,
+            OpencodeStopWorkflowTool::class,
+            OpencodeAskTool::class,
         ]);
 });
 

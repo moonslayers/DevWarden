@@ -6,6 +6,7 @@ use App\Models\AiProvider;
 use App\Models\BotSetting;
 use App\Models\TelegramChatConversation;
 use App\Models\TelegramSetting;
+use App\Services\TimeSeriesService;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Collection;
 use Inertia\Inertia;
@@ -41,40 +42,7 @@ class DashboardController extends Controller
      */
     public static function bucketDaily(Collection $items, string $dateField, callable $extractor, int $days = 14, array $seriesKeys = []): array
     {
-        $labels = [];
-        $dayIndex = [];
-        $today = Carbon::today();
-
-        for ($i = $days - 1; $i >= 0; $i--) {
-            $label = $today->copy()->subDays($i)->toDateString();
-            $labels[] = $label;
-            $dayIndex[$label] = $days - 1 - $i;
-        }
-
-        $series = collect($seriesKeys)
-            ->mapWithKeys(fn (string $key): array => [$key => array_fill(0, $days, 0)])
-            ->all();
-
-        foreach ($items as $item) {
-            $date = data_get($item, $dateField);
-            $label = $date !== null ? Carbon::parse($date)->toDateString() : null;
-
-            if ($label === null || ! isset($dayIndex[$label])) {
-                continue;
-            }
-
-            $index = $dayIndex[$label];
-
-            foreach ($extractor($item) as $key => $value) {
-                if (! isset($series[$key])) {
-                    $series[$key] = array_fill(0, $days, 0);
-                }
-
-                $series[$key][$index] += $value;
-            }
-        }
-
-        return array_merge(['labels' => $labels], $series);
+        return app(TimeSeriesService::class)->bucketDaily($items, $dateField, $extractor, $days, $seriesKeys);
     }
 
     /**
