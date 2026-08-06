@@ -2,6 +2,7 @@
 
 namespace App\Console\Commands;
 
+use App\Jobs\HandleTelegramCallbackQuery;
 use App\Models\TelegramSetting;
 use App\Services\Telegram\Exceptions\TelegramApiException;
 use App\Services\Telegram\Exceptions\TelegramNotConfiguredException;
@@ -55,11 +56,33 @@ class PollTelegramUpdates extends Command
         $buffer = app(TelegramMessageBuffer::class);
         $affectedChats = [];
         $buffered = 0;
+        $callbacks = 0;
 
         foreach ($updates as $update) {
             $lastUpdateId = max($lastUpdateId, (int) $update['update_id']);
 
             $chatId = $update['chat_id'] ?? null;
+
+            // Inline-button callbacks are not messages: they are routed to their
+            // own job (which answers the callback with the outcome) and never
+            // reach the debounce buffer. Callbacks from unauthorized chats are
+            // discarded, but the offset is still advanced so they never
+            // re-deliver.
+            if (isset($update['callback_data'])) {
+                if ($chatId !== null && in_array((int) $chatId, $allowedChats, true)) {
+                    HandleTelegramCallbackQuery::dispatch(
+                        (string) $update['callback_query_id'],
+                        (int) $chatId,
+                        (string) $update['callback_data'],
+                        $update['callback_message_id'] ?? null,
+                    );
+
+                    $callbacks++;
+                }
+
+                continue;
+            }
+
             $messageId = $update['message_id'] ?? null;
             $text = $update['text'] ?? null;
             $photo = $update['photo'] ?? null;
@@ -90,7 +113,7 @@ class PollTelegramUpdates extends Command
             $settings->forceFill(['last_update_id' => $lastUpdateId])->save();
         }
 
-        $this->components->info(sprintf('Polled %d update(s); buffered %d message(s) into %d chat(s).', count($updates), $buffered, count($affectedChats)));
+        $this->components->info(sprintf('Polled %d update(s); buffered %d message(s) into %d chat(s); dispatched %d callback query job(s).', count($updates), $buffered, count($affectedChats), $callbacks));
 
         return self::SUCCESS;
     }

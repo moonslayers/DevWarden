@@ -10,7 +10,6 @@ import { edit as editBot } from '@/routes/bot';
 import { edit as editProfile } from '@/routes/profile';
 import { index as editProviders } from '@/routes/providers';
 import { edit as editSecurity } from '@/routes/security';
-import { index as indexSkills } from '@/routes/settings/skills';
 import { edit as editTelegram } from '@/routes/telegram';
 import type { NavItem } from '@/types';
 
@@ -38,10 +37,6 @@ const sidebarNavItems: NavItem[] = [
     {
         title: 'Bot',
         href: editBot(),
-    },
-    {
-        title: 'Skills',
-        href: indexSkills(),
     },
 ];
 

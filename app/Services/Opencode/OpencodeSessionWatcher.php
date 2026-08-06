@@ -32,6 +32,21 @@ class OpencodeSessionWatcher
     private const SUMMARY_MAX_LENGTH = 2000;
 
     /**
+     * Max characters kept for an interactive question's text in a notification.
+     */
+    private const QUESTION_TEXT_MAX_LENGTH = 200;
+
+    /**
+     * Max characters kept for an answer option label in a notification.
+     */
+    private const OPTION_TEXT_MAX_LENGTH = 120;
+
+    /**
+     * Max characters kept for an inline keyboard button text.
+     */
+    private const OPTION_BUTTON_MAX_LENGTH = 30;
+
+    /**
      * A session whose Updated timestamp is newer than this many hours is
      * considered recently active, used to gate the error notification signal.
      */
@@ -58,6 +73,31 @@ class OpencodeSessionWatcher
      * input keeps a stale time_updated and stays discoverable.
      */
     private const WATCH_WATERMARK_RESTART_MINUTES = 10;
+
+    /**
+     * The boot summary lists at most this many active sessions so the single
+     * "active since boot" message stays compact.
+     */
+    private const MAX_BOOT_SUMMARY_SESSIONS = 10;
+
+    /**
+     * When computing the boot summary after a detected restart, sessions with
+     * activity this far BEFORE the freshly reset watermark are still included.
+     * Without the grace window a session updated a few seconds before the
+     * restart (time_updated slightly older than the reset) is invisible on the
+     * boot tick and the summary is skipped entirely.
+     */
+    private const BOOT_SUMMARY_GRACE_MINUTES = 5;
+
+    /**
+     * How long after a detected restart the watcher keeps retrying the boot
+     * summary while no relevant session has appeared. Within this window an
+     * empty result does NOT seal the boot-reported marker, so a session that
+     * becomes visible a tick or two after boot is still reported. Once the
+     * window expires the marker is sealed without a message so a genuinely
+     * empty boot never retries forever.
+     */
+    private const BOOT_SUMMARY_RETRY_WINDOW_MINUTES = 3;
 
     public function __construct(
         private readonly OpencodeSessionStore $store,
@@ -107,10 +147,6 @@ class OpencodeSessionWatcher
             return;
         }
 
-        if ($sessions === []) {
-            return;
-        }
-
         $excludedSessionIds = OpencodeWorkflow::query()
             ->whereNotNull('opencode_session_id')
             ->pluck('opencode_session_id')
@@ -119,6 +155,12 @@ class OpencodeSessionWatcher
         $permissionSessionIds = $this->pendingPermissionSessionIds();
 
         $dismissedSessionIds = $this->dismissedSessionIds();
+
+        // The boot summary is also evaluated when discovery returned an empty
+        // list: the grace window may still surface sessions active just before
+        // the restart, and an empty result must not seal the marker while the
+        // retry window is still open.
+        $this->maybeSendBootSummary($sessions, $chatId, $since, $excludedSessionIds, $dismissedSessionIds);
 
         foreach ($sessions as $session) {
             if (in_array($session['id'], $excludedSessionIds, true)) {
@@ -178,6 +220,9 @@ class OpencodeSessionWatcher
 
         if ($since === null
             || $since->diffInMinutes(now()) > self::WATCH_WATERMARK_RESTART_MINUTES) {
+            // A detected restart also re-arms the boot summary marker, so this
+            // boot emits exactly one "sessions active since startup" report.
+            $settings->session_watch_boot_reported_at = null;
             $settings->session_watch_since = now();
             $settings->save();
 
@@ -335,11 +380,25 @@ class OpencodeSessionWatcher
         }
 
         if ($state['has_running_part']) {
+            $isQuestionTurn = $state['last_turn_tool'] === 'question';
+
+            // A live running 'question' tool means the session is waiting for
+            // the user's input — a notifiable milestone. It is reported once
+            // per question turn: the marker is cleared again as soon as the
+            // session works on anything else, so the next question turn is
+            // notified instead of the already-reported one.
+            if ($isQuestionTurn && $watch->last_notified_event !== 'question') {
+                $this->notifyQuestionTurn($watch, $session, $chatId, $directory);
+
+                return;
+            }
+
             $watch->forceFill([
                 'last_seen_status' => 'working',
                 'title' => $this->resolveTitle($session, $watch),
                 'project_path' => $directory,
                 'checked_at' => now(),
+                'last_notified_event' => $isQuestionTurn ? $watch->last_notified_event : null,
             ])->save();
 
             return;
@@ -438,11 +497,25 @@ class OpencodeSessionWatcher
         $event = $hasQuestion ? 'question' : 'finished';
         $title = $this->resolveTitle($session, $watch);
 
-        $message = $hasQuestion
-            ? "La sesión de opencode \"{$title}\" tiene preguntas.\n\n{$summary}\n\nResponde para continuar."
-            : "La sesión de opencode \"{$title}\" terminó.\n\nProyecto: {$directory}\n\n{$summary}";
+        if ($hasQuestion) {
+            $payload = $this->buildQuestionNotification(
+                $title,
+                $session['id'],
+                $summary,
+                $this->resolveQuestionOptions($session['id']),
+            );
 
-        $sent = $this->notifier->notify($chatId, $message);
+            $message = $payload['message'];
+            $keyboard = $payload['keyboard'];
+
+            $sent = $keyboard === null
+                ? $this->notifier->notify($chatId, $message)
+                : $this->notifier->notify($chatId, $message, $keyboard);
+        } else {
+            $message = "La sesión de opencode \"{$title}\" terminó.\n\nProyecto: {$directory}\n\n{$summary}";
+
+            $sent = $this->notifier->notify($chatId, $message);
+        }
 
         if (! $sent) {
             Log::warning('OpencodeSessionWatcher: notification failed, will retry next tick.', [
@@ -460,6 +533,375 @@ class OpencodeSessionWatcher
             'notified_at' => now(),
             'checked_at' => now(),
         ])->save();
+    }
+
+    /**
+     * Notify the owner that a live running 'question' turn is waiting for input.
+     *
+     * The session is still alive (has a running part) but paused on a question
+     * the user must answer. The watch keeps last_seen_status 'working' so a
+     * later working -> stopped transition still reports the finish; the
+     * last_notified_event marker prevents a second notification for the same
+     * turn, and is cleared by inspectSession as soon as the session works on
+     * anything else.
+     *
+     * @param  array{id: string, title: ?string, directory: ?string, time_updated: ?int, parent_id: ?string}  $session
+     */
+    private function notifyQuestionTurn(
+        OpencodeSessionWatch $watch,
+        array $session,
+        int $chatId,
+        string $directory,
+    ): void {
+        try {
+            $conversation = $this->manager->conversation($session['id'], $directory);
+        } catch (OpencodeException $e) {
+            Log::warning('OpencodeSessionWatcher: failed to fetch session conversation for the question turn.', [
+                'session_id' => $session['id'],
+                'error' => $e->getMessage(),
+            ]);
+
+            return;
+        }
+
+        $last = $this->parser->lastAssistantText($conversation);
+        $summary = $this->parser->truncate($last, self::SUMMARY_MAX_LENGTH);
+        $title = $this->resolveTitle($session, $watch);
+
+        $payload = $this->buildQuestionNotification(
+            $title,
+            $session['id'],
+            $summary,
+            $this->resolveQuestionOptions($session['id']),
+        );
+
+        $message = $payload['message'];
+        $keyboard = $payload['keyboard'];
+
+        $sent = $keyboard === null
+            ? $this->notifier->notify($chatId, $message)
+            : $this->notifier->notify($chatId, $message, $keyboard);
+
+        if (! $sent) {
+            Log::warning('OpencodeSessionWatcher: question notification failed, will retry next tick.', [
+                'session_id' => $session['id'],
+            ]);
+
+            return;
+        }
+
+        $watch->forceFill([
+            'last_seen_status' => 'working',
+            'last_notified_event' => 'question',
+            'project_path' => $directory,
+            'title' => $title,
+            'notified_at' => now(),
+            'checked_at' => now(),
+        ])->save();
+    }
+
+    /**
+     * Resolve the session's interactive answer options, best-effort.
+     *
+     * The store never throws, but the watcher's never-throws contract still
+     * guards the call: a failure degrades to no options, so the notification
+     * falls back to the plain text message.
+     *
+     * @return list<array{question: string, options: list<array{label: string, description: ?string}>}>
+     */
+    private function resolveQuestionOptions(string $sessionId): array
+    {
+        try {
+            return $this->store->questionOptions($sessionId);
+        } catch (Throwable $e) {
+            Log::debug('OpencodeSessionWatcher: failed to resolve question options.', [
+                'session_id' => $sessionId,
+                'error' => $e->getMessage(),
+            ]);
+
+            return [];
+        }
+    }
+
+    /**
+     * Build the "session has questions" notification payload.
+     *
+     * When the store exposes interactive answer options the message lists every
+     * question with its lettered options and the session id, and every option
+     * becomes an inline keyboard button. Each button's callback_data follows
+     * the `oq:{session_id}:{question_index}:{option_index}` contract (both
+     * indices base-0); this is the ONLY callback_data format the answer
+     * pipeline parses. Without options the payload degrades to the plain text
+     * notification, so the message and the single-argument notify call are
+     * unchanged.
+     *
+     * @param  list<array{question: string, options: list<array{label: string, description: ?string}>}>  $questions
+     * @return array{message: string, keyboard: ?array}
+     */
+    private function buildQuestionNotification(string $title, string $sessionId, string $summary, array $questions): array
+    {
+        if ($questions === []) {
+            return [
+                'message' => "La sesión de opencode \"{$title}\" tiene preguntas.\n\n{$summary}\n\nResponde para continuar.",
+                'keyboard' => null,
+            ];
+        }
+
+        $lines = [
+            "La sesión de opencode \"{$title}\" tiene preguntas.",
+            '',
+            "Sesión: {$sessionId}",
+            '',
+        ];
+
+        $rows = [];
+
+        foreach ($questions as $questionIndex => $question) {
+            $lines[] = 'Pregunta '.($questionIndex + 1).': '
+                .$this->parser->truncate($question['question'], self::QUESTION_TEXT_MAX_LENGTH);
+
+            $row = [];
+
+            foreach ($question['options'] as $optionIndex => $option) {
+                $lines[] = '('.$this->optionLetter($optionIndex).') '
+                    .$this->parser->truncate($option['label'], self::OPTION_TEXT_MAX_LENGTH);
+
+                $row[] = [
+                    'text' => $this->optionButtonText($questionIndex, $optionIndex, $option['label'], count($questions)),
+                    'callback_data' => "oq:{$sessionId}:{$questionIndex}:{$optionIndex}",
+                ];
+            }
+
+            $rows[] = $row;
+            $lines[] = '';
+        }
+
+        $lines[] = 'Toca un botón para responder.';
+
+        return [
+            'message' => implode("\n", $lines),
+            'keyboard' => ['inline_keyboard' => $rows],
+        ];
+    }
+
+    /**
+     * Letter an option index for display (a, b, c, ...), falling back to the
+     * raw number once the Latin alphabet is exhausted.
+     */
+    private function optionLetter(int $index): string
+    {
+        return $index < 26 ? chr(ord('a') + $index) : (string) $index;
+    }
+
+    /**
+     * Text for an option's keyboard button.
+     *
+     * With a single question the label alone is enough; with several the
+     * question number and the option letter prefix it (e.g. "1a: ...") so the
+     * user can map the button to the matching entry in the message. The text is
+     * truncated because Telegram clips overly long button labels, while the
+     * callback_data (the actual payload) stays intact.
+     */
+    private function optionButtonText(int $questionIndex, int $optionIndex, string $label, int $questionCount): string
+    {
+        $text = $questionCount > 1
+            ? ($questionIndex + 1).$this->optionLetter($optionIndex).': '.$label
+            : $label;
+
+        return $this->parser->truncate($text, self::OPTION_BUTTON_MAX_LENGTH);
+    }
+
+    /**
+     * Send the single "sessions active since startup" summary, once per boot.
+     *
+     * The boot summary is armed when resolveWatchSince detects a restart and
+     * persisted only once it has actually been sent, so a successful boot
+     * reports exactly once. A failed notify leaves the marker unset and the
+     * next tick retries. When no relevant session exists yet, the marker is
+     * NOT sealed while the retry window is open: the session may only become
+     * visible a tick or two after the restart. Only once the retry window
+     * expires (no real activity since boot) is the marker sealed without a
+     * message, so a genuinely empty boot does not retry forever.
+     *
+     * @param  list<array{id: string, title: ?string, directory: ?string, time_updated: ?int, parent_id: ?string}>  $sessions
+     * @param  list<string>  $excludedSessionIds
+     * @param  list<string>  $dismissedSessionIds
+     */
+    private function maybeSendBootSummary(
+        array $sessions,
+        int $chatId,
+        ?int $since,
+        array $excludedSessionIds,
+        array $dismissedSessionIds,
+    ): void {
+        try {
+            $settings = OpencodeSetting::singleton();
+        } catch (Throwable $e) {
+            Log::debug('OpencodeSessionWatcher: failed to read the boot summary marker, skipping.', [
+                'error' => $e->getMessage(),
+            ]);
+
+            return;
+        }
+
+        if ($settings->session_watch_boot_reported_at !== null) {
+            return;
+        }
+
+        $relevant = $this->bootSummarySessions(
+            $this->bootSummaryCandidateSessions($sessions, $since),
+            $excludedSessionIds,
+            $dismissedSessionIds,
+        );
+
+        if ($relevant === []) {
+            if ($this->isWithinBootRetryWindow($settings)) {
+                return;
+            }
+
+            $this->markBootSummaryReported($settings);
+
+            return;
+        }
+
+        $sent = $this->notifier->notify($chatId, $this->formatBootSummary($relevant));
+
+        if (! $sent) {
+            Log::warning('OpencodeSessionWatcher: boot summary notification failed, will retry next tick.', []);
+
+            return;
+        }
+
+        $this->markBootSummaryReported($settings);
+    }
+
+    /**
+     * Build the session set the boot summary evaluates over.
+     *
+     * During the boot window the summary must include sessions whose last
+     * activity fell shortly BEFORE the freshly reset watermark (a few seconds
+     * of race between the restart and the reset), so discovery is re-run with
+     * a grace-window cutoff. On failure the discovery set is used unchanged.
+     *
+     * @param  list<array{id: string, title: ?string, directory: ?string, time_updated: ?int, parent_id: ?string}>  $sessions
+     * @return list<array{id: string, title: ?string, directory: ?string, time_updated: ?int, parent_id: ?string}>
+     */
+    private function bootSummaryCandidateSessions(array $sessions, ?int $since): array
+    {
+        if ($since === null) {
+            return $sessions;
+        }
+
+        $graceSince = $since - self::BOOT_SUMMARY_GRACE_MINUTES * 60 * 1000;
+
+        try {
+            return $this->store->activeSessions($graceSince);
+        } catch (Throwable $e) {
+            Log::debug('OpencodeSessionWatcher: failed to extend the boot summary to the grace window, falling back to the discovery set.', [
+                'error' => $e->getMessage(),
+            ]);
+
+            return $sessions;
+        }
+    }
+
+    /**
+     * Whether the boot summary retry window (from the session-watch watermark)
+     * is still open, meaning an empty result should keep retrying instead of
+     * sealing the marker.
+     */
+    private function isWithinBootRetryWindow(OpencodeSetting $settings): bool
+    {
+        $bootedAt = $settings->session_watch_since;
+
+        return $bootedAt !== null
+            && $bootedAt->isAfter(now()->subMinutes(self::BOOT_SUMMARY_RETRY_WINDOW_MINUTES));
+    }
+
+    /**
+     * Collect the sessions relevant to the boot summary: not workflow-owned,
+     * not dismissed, not sub-agents and currently live (a running part), each
+     * classified as working or waiting for the user's answer.
+     *
+     * @param  list<array{id: string, title: ?string, directory: ?string, time_updated: ?int, parent_id: ?string}>  $sessions
+     * @param  list<string>  $excludedSessionIds
+     * @param  list<string>  $dismissedSessionIds
+     * @return list<array{title: string, directory: string, waiting: bool}>
+     */
+    private function bootSummarySessions(array $sessions, array $excludedSessionIds, array $dismissedSessionIds): array
+    {
+        $relevant = [];
+
+        foreach ($sessions as $session) {
+            if (in_array($session['id'], $excludedSessionIds, true)
+                || in_array($session['id'], $dismissedSessionIds, true)
+                || ($session['parent_id'] ?? null) !== null) {
+                continue;
+            }
+
+            try {
+                $state = $this->store->sessionState($session['id']);
+            } catch (Throwable $e) {
+                Log::debug('OpencodeSessionWatcher: failed to resolve session state for the boot summary.', [
+                    'session_id' => $session['id'],
+                    'error' => $e->getMessage(),
+                ]);
+
+                continue;
+            }
+
+            if (! $state['has_running_part']) {
+                continue;
+            }
+
+            $title = $session['title'];
+            $directory = $state['directory'] ?? $session['directory'];
+
+            $relevant[] = [
+                'title' => ($title !== null && $title !== '') ? $title : $session['id'],
+                'directory' => $directory ?? '',
+                'waiting' => $state['last_turn_tool'] === 'question',
+            ];
+
+            if (count($relevant) >= self::MAX_BOOT_SUMMARY_SESSIONS) {
+                break;
+            }
+        }
+
+        return $relevant;
+    }
+
+    /**
+     * @param  list<array{title: string, directory: string, waiting: bool}>  $sessions
+     */
+    private function formatBootSummary(array $sessions): string
+    {
+        $lines = array_map(
+            static fn (array $session): string => '- '.$session['title'].' ('.$session['directory'].') — '
+                .($session['waiting'] ? 'esperando respuesta' : 'trabajando'),
+            $sessions,
+        );
+
+        return "Sesiones activas desde el inicio del servidor:\n".implode("\n", $lines);
+    }
+
+    /**
+     * Persist the "boot summary already reported" marker so later ticks do not
+     * emit it again. Best-effort: a failure degrades to not marking, which
+     * only means the summary is retried on the next tick.
+     */
+    private function markBootSummaryReported(?OpencodeSetting $settings = null): void
+    {
+        try {
+            $settings ??= OpencodeSetting::singleton();
+
+            $settings->session_watch_boot_reported_at = now();
+            $settings->save();
+        } catch (Throwable $e) {
+            Log::debug('OpencodeSessionWatcher: failed to persist the boot summary marker.', [
+                'error' => $e->getMessage(),
+            ]);
+        }
     }
 
     /**

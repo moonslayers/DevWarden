@@ -2,6 +2,7 @@
 
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\MemoryController;
+use App\Http\Controllers\SkillController;
 use App\Http\Controllers\SubAgentController;
 use Illuminate\Support\Facades\Route;
 
@@ -12,6 +13,11 @@ Route::middleware(['auth', 'verified'])->group(function () {
 
     Route::get('memories', [MemoryController::class, 'index'])->name('memories.index');
     Route::delete('memories/{memory}', [MemoryController::class, 'destroy'])->name('memories.destroy');
+
+    Route::get('skills', [SkillController::class, 'index'])->name('skills.index');
+    Route::post('skills', [SkillController::class, 'store'])->name('skills.store');
+    Route::patch('skills/{skill}', [SkillController::class, 'update'])->name('skills.update');
+    Route::delete('skills/{skill}', [SkillController::class, 'destroy'])->name('skills.destroy');
 
     Route::get('subagents', [SubAgentController::class, 'index'])->name('subagents.index');
     Route::post('subagents', [SubAgentController::class, 'store'])->name('subagents.store');

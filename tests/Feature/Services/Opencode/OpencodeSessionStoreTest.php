@@ -6,7 +6,7 @@ use Tests\Support\OpencodeStoreFixture;
 /**
  * Build a part row whose data is a tool part with the given state.
  */
-function opencodeToolPart(string $id, string $sessionId, int $timeCreated, string $status, string $error = ''): array
+function opencodeToolPart(string $id, string $sessionId, int $timeCreated, string $status, string $error = '', string $tool = 'bash'): array
 {
     $state = ['status' => $status];
 
@@ -19,7 +19,21 @@ function opencodeToolPart(string $id, string $sessionId, int $timeCreated, strin
         'session_id' => $sessionId,
         'time_created' => $timeCreated,
         'time_updated' => $timeCreated,
-        'data' => json_encode(['type' => 'tool', 'tool' => 'bash', 'state' => $state]),
+        'data' => json_encode(['type' => 'tool', 'tool' => $tool, 'state' => $state]),
+    ];
+}
+
+/**
+ * Build a part row whose data is a step-finish part closing a turn.
+ */
+function opencodeStepFinishPart(string $id, string $sessionId, int $timeCreated): array
+{
+    return [
+        'id' => $id,
+        'session_id' => $sessionId,
+        'time_created' => $timeCreated,
+        'time_updated' => $timeCreated,
+        'data' => json_encode(['type' => 'step-finish', 'reason' => 'stop']),
     ];
 }
 
@@ -34,6 +48,28 @@ function opencodeTextPart(string $id, string $sessionId, int $timeCreated): arra
         'time_created' => $timeCreated,
         'time_updated' => $timeCreated,
         'data' => json_encode(['type' => 'text', 'text' => 'continued']),
+    ];
+}
+
+/**
+ * Build a part row whose data is a question tool part carrying input questions.
+ */
+function opencodeQuestionPart(string $id, string $sessionId, int $timeCreated, array $questions, string $status = 'completed'): array
+{
+    return [
+        'id' => $id,
+        'session_id' => $sessionId,
+        'time_created' => $timeCreated,
+        'time_updated' => $timeCreated,
+        'data' => json_encode([
+            'type' => 'tool',
+            'tool' => 'question',
+            'callID' => 'call_'.$id,
+            'state' => [
+                'status' => $status,
+                'input' => ['questions' => $questions],
+            ],
+        ]),
     ];
 }
 
@@ -403,6 +439,129 @@ test('sessionState reports no parts when the session has none', function () {
     expect($state['title'])->toBe('Empty');
 });
 
+test('sessionState treats a running part before the last step-finish as stale', function () {
+    $store = new OpencodeSessionStore(OpencodeStoreFixture::create(
+        sessions: [
+            ['id' => 'ses_zombie', 'title' => 'Zombie', 'directory' => '/projects/a', 'time_created' => 1000, 'time_updated' => 5000, 'time_archived' => null],
+        ],
+        parts: [
+            opencodeToolPart('part_1', 'ses_zombie', 1500, 'running'),
+            opencodeStepFinishPart('part_2', 'ses_zombie', 2500),
+            opencodeStepFinishPart('part_3', 'ses_zombie', 4000),
+        ],
+    ));
+
+    $state = $store->sessionState('ses_zombie');
+
+    expect($state['has_running_part'])->toBeFalse();
+    expect($state['last_turn_tool'])->toBeNull();
+    expect($state['has_any_part'])->toBeTrue();
+});
+
+test('sessionState treats a running part after the last step-finish as live', function () {
+    $store = new OpencodeSessionStore(OpencodeStoreFixture::create(
+        sessions: [
+            ['id' => 'ses_live', 'title' => 'Live', 'directory' => '/projects/a', 'time_created' => 1000, 'time_updated' => 6000, 'time_archived' => null],
+        ],
+        parts: [
+            opencodeStepFinishPart('part_1', 'ses_live', 2000),
+            opencodeStepFinishPart('part_2', 'ses_live', 3000),
+            opencodeToolPart('part_3', 'ses_live', 4500, 'running'),
+        ],
+    ));
+
+    $state = $store->sessionState('ses_live');
+
+    expect($state['has_running_part'])->toBeTrue();
+    expect($state['last_turn_tool'])->toBe('bash');
+});
+
+test('sessionState reports a question as the live running tool', function () {
+    $store = new OpencodeSessionStore(OpencodeStoreFixture::create(
+        sessions: [
+            ['id' => 'ses_question', 'title' => 'Question', 'directory' => '/projects/a', 'time_created' => 1000, 'time_updated' => 6000, 'time_archived' => null],
+        ],
+        parts: [
+            opencodeStepFinishPart('part_1', 'ses_question', 3000),
+            opencodeToolPart('part_2', 'ses_question', 5000, 'running', tool: 'question'),
+        ],
+    ));
+
+    $state = $store->sessionState('ses_question');
+
+    expect($state['has_running_part'])->toBeTrue();
+    expect($state['last_turn_tool'])->toBe('question');
+});
+
+test('sessionState picks the most recent live running tool', function () {
+    $store = new OpencodeSessionStore(OpencodeStoreFixture::create(
+        sessions: [
+            ['id' => 'ses_multi', 'title' => 'Multi', 'directory' => '/projects/a', 'time_created' => 1000, 'time_updated' => 6000, 'time_archived' => null],
+        ],
+        parts: [
+            opencodeStepFinishPart('part_1', 'ses_multi', 2000),
+            opencodeToolPart('part_2', 'ses_multi', 3500, 'running', tool: 'read'),
+            opencodeToolPart('part_3', 'ses_multi', 4500, 'running', tool: 'bash'),
+        ],
+    ));
+
+    $state = $store->sessionState('ses_multi');
+
+    expect($state['has_running_part'])->toBeTrue();
+    expect($state['last_turn_tool'])->toBe('bash');
+});
+
+test('sessionState ignores stale running parts when a live one exists', function () {
+    $store = new OpencodeSessionStore(OpencodeStoreFixture::create(
+        sessions: [
+            ['id' => 'ses_mixed', 'title' => 'Mixed', 'directory' => '/projects/a', 'time_created' => 1000, 'time_updated' => 6000, 'time_archived' => null],
+        ],
+        parts: [
+            opencodeToolPart('part_1', 'ses_mixed', 1500, 'running', tool: 'task'),
+            opencodeStepFinishPart('part_2', 'ses_mixed', 3000),
+            opencodeToolPart('part_3', 'ses_mixed', 5000, 'running', tool: 'question'),
+        ],
+    ));
+
+    $state = $store->sessionState('ses_mixed');
+
+    expect($state['has_running_part'])->toBeTrue();
+    expect($state['last_turn_tool'])->toBe('question');
+});
+
+test('sessionState treats a running part closed by a newer step-finish as stale', function () {
+    $store = new OpencodeSessionStore(OpencodeStoreFixture::create(
+        sessions: [
+            ['id' => 'ses_closed', 'title' => 'Closed', 'directory' => '/projects/a', 'time_created' => 1000, 'time_updated' => 6000, 'time_archived' => null],
+        ],
+        parts: [
+            opencodeToolPart('part_1', 'ses_closed', 4000, 'running'),
+            opencodeStepFinishPart('part_2', 'ses_closed', 5000),
+        ],
+    ));
+
+    $state = $store->sessionState('ses_closed');
+
+    expect($state['has_running_part'])->toBeFalse();
+    expect($state['last_turn_tool'])->toBeNull();
+});
+
+test('sessionState treats a running part without any step-finish as live', function () {
+    $store = new OpencodeSessionStore(OpencodeStoreFixture::create(
+        sessions: [
+            ['id' => 'ses_no_finish', 'title' => 'No Finish', 'directory' => '/projects/a', 'time_created' => 1000, 'time_updated' => 6000, 'time_archived' => null],
+        ],
+        parts: [
+            opencodeToolPart('part_1', 'ses_no_finish', 4500, 'running', tool: 'bash'),
+        ],
+    ));
+
+    $state = $store->sessionState('ses_no_finish');
+
+    expect($state['has_running_part'])->toBeTrue();
+    expect($state['last_turn_tool'])->toBe('bash');
+});
+
 test('sessionState returns an empty state for an unknown session id', function () {
     $store = new OpencodeSessionStore(OpencodeStoreFixture::create(
         sessions: [
@@ -417,7 +576,100 @@ test('sessionState returns an empty state for an unknown session id', function (
         'has_running_part' => false,
         'has_error_part' => false,
         'has_any_part' => false,
+        'last_turn_tool' => null,
     ]);
+});
+
+test('questionOptions extracts questions and options from the most recent question part', function () {
+    $store = new OpencodeSessionStore(OpencodeStoreFixture::create(
+        sessions: [
+            ['id' => 'ses_question', 'title' => 'Question', 'directory' => '/projects/a', 'time_created' => 1000, 'time_updated' => 6000, 'time_archived' => null],
+        ],
+        parts: [
+            opencodeQuestionPart('part_1', 'ses_question', 3000, [
+                ['title' => 'Stale question', 'options' => [['label' => 'Stale', 'description' => 'old']]],
+            ]),
+            opencodeQuestionPart('part_2', 'ses_question', 5000, [
+                ['title' => 'Migration approach?', 'options' => [
+                    ['label' => 'Fresh migration', 'description' => 'Recreate the schema from scratch'],
+                    ['label' => 'Incremental'],
+                ]],
+                ['title' => 'Rollout?', 'options' => [
+                    ['label' => 'All at once'],
+                ]],
+            ]),
+        ],
+    ));
+
+    expect($store->questionOptions('ses_question'))->toBe([
+        [
+            'question' => 'Migration approach?',
+            'options' => [
+                ['label' => 'Fresh migration', 'description' => 'Recreate the schema from scratch'],
+                ['label' => 'Incremental', 'description' => null],
+            ],
+        ],
+        [
+            'question' => 'Rollout?',
+            'options' => [
+                ['label' => 'All at once', 'description' => null],
+            ],
+        ],
+    ]);
+});
+
+test('questionOptions returns an empty array when the session has no question part', function () {
+    $store = new OpencodeSessionStore(OpencodeStoreFixture::create(
+        sessions: [
+            ['id' => 'ses_plain', 'title' => 'Plain', 'directory' => '/projects/a', 'time_created' => 1000, 'time_updated' => 2000, 'time_archived' => null],
+        ],
+        parts: [
+            opencodeToolPart('part_1', 'ses_plain', 1500, 'completed'),
+        ],
+    ));
+
+    expect($store->questionOptions('ses_plain'))->toBe([]);
+    expect($store->questionOptions('ses_unknown'))->toBe([]);
+});
+
+test('questionOptions returns an empty array for an invalid or empty question payload', function () {
+    $store = new OpencodeSessionStore(OpencodeStoreFixture::create(
+        sessions: [
+            ['id' => 'ses_bad', 'title' => 'Bad', 'directory' => '/projects/a', 'time_created' => 1000, 'time_updated' => 3000, 'time_archived' => null],
+        ],
+        parts: [
+            ['id' => 'part_1', 'session_id' => 'ses_bad', 'time_created' => 1500, 'time_updated' => 1500, 'data' => json_encode(['type' => 'tool', 'tool' => 'question', 'state' => ['status' => 'completed', 'input' => ['questions' => 'not an array']]])],
+            ['id' => 'part_2', 'session_id' => 'ses_bad', 'time_created' => 2500, 'time_updated' => 2500, 'data' => '{not json'],
+        ],
+    ));
+
+    expect($store->questionOptions('ses_bad'))->toBe([]);
+});
+
+test('questionOptions skips questions without valid options and normalizes labels', function () {
+    $store = new OpencodeSessionStore(OpencodeStoreFixture::create(
+        sessions: [
+            ['id' => 'ses_q', 'title' => 'Question', 'directory' => '/projects/a', 'time_created' => 1000, 'time_updated' => 2000, 'time_archived' => null],
+        ],
+        parts: [
+            opencodeQuestionPart('part_1', 'ses_q', 1500, [
+                ['title' => 'No options', 'options' => []],
+                ['title' => 'Bad options', 'options' => [['foo' => 'bar'], ['label' => 42, 'description' => 7]]],
+                ['title' => 'Kept', 'options' => [['label' => 'Go']]],
+            ]),
+        ],
+    ));
+
+    expect($store->questionOptions('ses_q'))->toBe([
+        ['question' => 'Bad options', 'options' => [['label' => '42', 'description' => null]]],
+        ['question' => 'Kept', 'options' => [['label' => 'Go', 'description' => null]]],
+    ]);
+});
+
+test('questionOptions returns an empty array without throwing when the database is missing', function () {
+    $store = new OpencodeSessionStore(sys_get_temp_dir().'/opencode_store_missing_'.uniqid().'.db');
+
+    expect($store->questionOptions('ses_unknown'))->toBe([]);
 });
 
 test('returns empty results without throwing when the database file does not exist', function () {
@@ -433,5 +685,6 @@ test('returns empty results without throwing when the database file does not exi
         'has_running_part' => false,
         'has_error_part' => false,
         'has_any_part' => false,
+        'last_turn_tool' => null,
     ]);
 });

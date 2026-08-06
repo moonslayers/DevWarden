@@ -1,5 +1,6 @@
 <?php
 
+use App\Jobs\HandleTelegramCallbackQuery;
 use App\Jobs\ProcessTelegramPendingBatch;
 use App\Models\TelegramPendingMessage;
 use App\Models\TelegramSetting;
@@ -266,4 +267,72 @@ test('dispatches one batch job per affected chat and stores the highest update i
     Queue::assertPushed(ProcessTelegramPendingBatch::class, fn ($job): bool => $job->chatId === 456);
 
     expect(TelegramSetting::singleton()->last_update_id)->toBe(503);
+});
+
+test('routes an authorized callback query to the callback job without buffering it and advances the offset', function () {
+    Queue::fake();
+
+    TelegramSetting::factory()->create([
+        'id' => 1,
+        'allowed_user_ids' => [123456789],
+        'last_update_id' => 100,
+    ]);
+
+    fakeTelegramClient([
+        [
+            'update_id' => 101,
+            'callback_query_id' => '4382bfdwdsd323',
+            'chat_id' => 123456789,
+            'callback_data' => 'oq:ses_abc:0:1',
+            'callback_message_id' => 42,
+        ],
+    ]);
+
+    $this->artisan('telegram:poll')->assertSuccessful();
+
+    expect(TelegramPendingMessage::query()->count())->toBe(0);
+
+    Queue::assertPushed(HandleTelegramCallbackQuery::class, 1);
+    Queue::assertPushed(HandleTelegramCallbackQuery::class, fn ($job): bool => $job->callbackQueryId === '4382bfdwdsd323'
+        && $job->chatId === 123456789
+        && $job->callbackData === 'oq:ses_abc:0:1'
+        && $job->callbackMessageId === 42
+    );
+    Queue::assertNotPushed(ProcessTelegramPendingBatch::class);
+
+    expect(TelegramSetting::singleton()->last_update_id)->toBe(101);
+});
+
+test('discards a callback query from an unauthorized chat but still advances the offset', function () {
+    Queue::fake();
+
+    TelegramSetting::factory()->create([
+        'id' => 1,
+        'allowed_user_ids' => [123456789],
+        'last_update_id' => 100,
+    ]);
+
+    fakeTelegramClient([
+        [
+            'update_id' => 101,
+            'callback_query_id' => 'cb-unauthorized',
+            'chat_id' => 999999,
+            'callback_data' => 'oq:ses_abc:0:1',
+        ],
+        [
+            'update_id' => 102,
+            'chat_id' => 123456789,
+            'message_id' => 1,
+            'text' => 'Hola bot',
+        ],
+    ]);
+
+    $this->artisan('telegram:poll')->assertSuccessful();
+
+    expect(TelegramPendingMessage::query()->count())->toBe(1);
+
+    Queue::assertPushed(HandleTelegramCallbackQuery::class, 0);
+    Queue::assertPushed(ProcessTelegramPendingBatch::class, 1);
+
+    expect(TelegramSetting::singleton()->last_update_id)->toBe(102);
 });

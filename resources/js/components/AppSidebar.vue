@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { Link } from '@inertiajs/vue3';
-import { Bot, Brain, LayoutGrid } from '@lucide/vue';
+import { Bot, Brain, LayoutGrid, Sparkles } from '@lucide/vue';
 import AppLogo from '@/components/AppLogo.vue';
 import NavMain from '@/components/NavMain.vue';
 import NavUser from '@/components/NavUser.vue';
@@ -15,6 +15,7 @@ import {
 } from '@/components/ui/sidebar';
 import { dashboard } from '@/routes';
 import { index as memoriesIndex } from '@/routes/memories';
+import { index as skillsIndex } from '@/routes/skills';
 import { index as subAgentsIndex } from '@/routes/subagents';
 import type { NavItem } from '@/types';
 
@@ -33,6 +34,11 @@ const mainNavItems: NavItem[] = [
         title: 'Sub-agents',
         href: subAgentsIndex(),
         icon: Bot,
+    },
+    {
+        title: 'Skills',
+        href: skillsIndex(),
+        icon: Sparkles,
     },
 ];
 </script>

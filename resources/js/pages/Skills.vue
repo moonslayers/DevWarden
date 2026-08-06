@@ -1,10 +1,18 @@
 <script setup lang="ts">
 import { Form, Head } from '@inertiajs/vue3';
-import { reactive, ref } from 'vue';
-import SkillController from '@/actions/App/Http/Controllers/Settings/SkillController';
+import { computed, reactive, ref } from 'vue';
+import SkillController from '@/actions/App/Http/Controllers/SkillController';
 import Heading from '@/components/Heading.vue';
 import InputError from '@/components/InputError.vue';
+import StatChart from '@/components/StatChart.vue';
 import { Button } from '@/components/ui/button';
+import {
+    Card,
+    CardContent,
+    CardDescription,
+    CardHeader,
+    CardTitle,
+} from '@/components/ui/card';
 import {
     Dialog,
     DialogClose,
@@ -18,7 +26,9 @@ import {
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
-import { index } from '@/routes/settings/skills';
+import { useChartPalette } from '@/composables/useChartPalette';
+import type { StatDataset } from '@/composables/useChartPalette';
+import { index as indexSkills } from '@/routes/skills';
 
 interface Skill {
     id: number;
@@ -31,8 +41,24 @@ interface Skill {
     sort_order: number;
 }
 
+interface SkillStats {
+    total_matches: number;
+    active_count: number;
+    inactive_count: number;
+    matches_by_day: {
+        labels: string[];
+        count: number[];
+    };
+    top_skills: {
+        id: number;
+        name: string;
+        match_count: number;
+    }[];
+}
+
 const props = defineProps<{
     skills: Skill[];
+    stats: SkillStats;
 }>();
 
 const newSkillActive = ref(true);
@@ -41,16 +67,50 @@ const activeState = reactive<Record<number, boolean>>(
     Object.fromEntries(props.skills.map((skill) => [skill.id, skill.active])),
 );
 
+const palette = useChartPalette();
+
 function keywordsToText(keywords: string[] | null): string {
     return (keywords ?? []).join(', ');
 }
+
+function formatNumber(value: number): string {
+    return new Intl.NumberFormat('en-US').format(value);
+}
+
+function dotColor(index: number): string {
+    return palette.value[index % palette.value.length];
+}
+
+const usageDailyLabels = computed(() => props.stats.matches_by_day.labels);
+
+const usageDailyDatasets = computed<StatDataset[]>(() => [
+    {
+        label: 'Matches',
+        data: props.stats.matches_by_day.count,
+    },
+]);
+
+const hasUsageActivity = computed(() =>
+    props.stats.matches_by_day.count.some((count) => count > 0),
+);
+
+const topSkillsLabels = computed(() =>
+    props.stats.top_skills.map((skill) => skill.name),
+);
+
+const topSkillsDatasets = computed<StatDataset[]>(() => [
+    {
+        label: 'Matches',
+        data: props.stats.top_skills.map((skill) => skill.match_count),
+    },
+]);
 
 defineOptions({
     layout: {
         breadcrumbs: [
             {
                 title: 'Skills',
-                href: index(),
+                href: indexSkills(),
             },
         ],
     },
@@ -68,6 +128,85 @@ defineOptions({
             title="Skills"
             description="Instruction blocks the bot injects when trigger keywords match"
         />
+
+        <div
+            class="grid gap-4 lg:grid-cols-2"
+            data-test="skills-chart-row"
+        >
+            <Card data-test="skills-usage-chart-card">
+                <CardHeader>
+                    <CardTitle>Skill matches per day</CardTitle>
+                    <CardDescription>
+                        Matches over the last 14 days
+                    </CardDescription>
+                </CardHeader>
+                <CardContent>
+                    <StatChart
+                        v-if="hasUsageActivity"
+                        type="line"
+                        :labels="usageDailyLabels"
+                        :datasets="usageDailyDatasets"
+                        :height="220"
+                    />
+                    <p
+                        v-else
+                        class="py-8 text-center text-sm text-muted-foreground"
+                    >
+                        No skill usage yet.
+                    </p>
+                </CardContent>
+            </Card>
+
+            <Card data-test="skills-top-chart-card">
+                <CardHeader>
+                    <CardTitle>Most used skills</CardTitle>
+                    <CardDescription>
+                        Top skills by number of matches
+                    </CardDescription>
+                </CardHeader>
+                <CardContent>
+                    <template v-if="stats.top_skills.length > 0">
+                        <StatChart
+                            type="bar"
+                            :labels="topSkillsLabels"
+                            :datasets="topSkillsDatasets"
+                            :height="220"
+                        />
+                        <ul class="mt-4 space-y-2 text-sm">
+                            <li
+                                v-for="(skill, index) in stats.top_skills"
+                                :key="skill.id"
+                                class="flex items-center justify-between gap-2"
+                            >
+                                <span class="flex items-center gap-2">
+                                    <span
+                                        class="h-2.5 w-2.5 rounded-full"
+                                        :style="{
+                                            backgroundColor: dotColor(index),
+                                        }"
+                                    />
+                                    {{ skill.name }}
+                                </span>
+                                <span class="text-muted-foreground">
+                                    {{ formatNumber(skill.match_count) }}
+                                    {{
+                                        skill.match_count === 1
+                                            ? 'match'
+                                            : 'matches'
+                                    }}
+                                </span>
+                            </li>
+                        </ul>
+                    </template>
+                    <p
+                        v-else
+                        class="py-8 text-center text-sm text-muted-foreground"
+                    >
+                        No skill usage yet.
+                    </p>
+                </CardContent>
+            </Card>
+        </div>
 
         <Form
             v-bind="SkillController.store.form()"
@@ -155,7 +294,7 @@ defineOptions({
                 </div>
                 <div class="flex items-center gap-2">
                     <Switch
-                        v-model:checked="newSkillActive"
+                        v-model="newSkillActive"
                         aria-label="Active"
                     />
                     <input
@@ -197,7 +336,7 @@ defineOptions({
                     </div>
                     <div class="flex items-center gap-2">
                         <Switch
-                            v-model:checked="activeState[skill.id]"
+                            v-model="activeState[skill.id]"
                             aria-label="Active"
                         />
                         <input

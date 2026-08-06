@@ -14,10 +14,11 @@ use Illuminate\Support\Carbon;
  * @property string $mcp_command
  * @property string|null $data_db_path
  * @property Carbon|null $session_watch_since
+ * @property Carbon|null $session_watch_boot_reported_at
  * @property Carbon|null $created_at
  * @property Carbon|null $updated_at
  */
-#[Fillable(['root_projects_path', 'mcp_command', 'data_db_path', 'session_watch_since'])]
+#[Fillable(['root_projects_path', 'mcp_command', 'data_db_path', 'session_watch_since', 'session_watch_boot_reported_at'])]
 class OpencodeSetting extends Model
 {
     /** @use HasFactory<OpencodeSettingFactory> */
@@ -40,6 +41,7 @@ class OpencodeSetting extends Model
     {
         return [
             'session_watch_since' => 'datetime',
+            'session_watch_boot_reported_at' => 'datetime',
         ];
     }
 }

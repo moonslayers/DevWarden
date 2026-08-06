@@ -27,6 +27,7 @@ use App\Models\BotSubAgent;
 use App\Models\OpencodeSessionDismissal;
 use App\Models\OpencodeSessionWatch;
 use App\Models\OpencodeWorkflow;
+use App\Models\SkillUsageLog;
 use App\Models\TelegramChatConversation;
 use App\Models\User;
 use App\Services\AiConfigSyncer;
@@ -228,6 +229,20 @@ class BotAgent implements Agent, Conversational, HasTools
             ),
         );
 
+        try {
+            $timestamp = now();
+
+            SkillUsageLog::query()->insert($skills->map(
+                fn (BotSkill $skill): array => [
+                    'skill_id' => $skill->id,
+                    'chat_id' => $chatId,
+                    'created_at' => $timestamp,
+                ],
+            )->all());
+        } catch (Throwable $e) {
+            Log::warning("Failed to record skill usage for chat [{$chatId}]: {$e->getMessage()}");
+        }
+
         return $blocks->implode(PHP_EOL).PHP_EOL.PHP_EOL.$text;
     }
 
@@ -270,11 +285,50 @@ class BotAgent implements Agent, Conversational, HasTools
                     ->all(),
             );
 
-            return $this->formatActiveSessionsBlock($sessions, $workingIds).PHP_EOL.PHP_EOL.$text;
+            $questionIds = $this->resolvePendingQuestionIds($sessions);
+
+            return $this->formatActiveSessionsBlock($sessions, $workingIds, $questionIds).PHP_EOL.PHP_EOL.$text;
         } catch (Throwable $e) {
             Log::warning("Failed to inject active opencode sessions: {$e->getMessage()}");
 
             return $text;
+        }
+    }
+
+    /**
+     * Resolve the ids of active sessions that are waiting for the user's input.
+     *
+     * A session counts as awaiting a question when its live running tool is the
+     * 'question' tool — the same signal the watcher uses to fire the question-turn
+     * notification. The state is read live from the opencode database, so a
+     * freshly-arrived question is flagged immediately and an answered one stops
+     * being flagged even before the watcher clears its last_notified_event
+     * marker. Degrades to no question marks when the store is unavailable, so
+     * the block never breaks over an unreadable session.
+     *
+     * @param  list<array{id: string, title: ?string, directory: ?string, time_updated: ?int, parent_id: ?string}>  $sessions
+     * @return list<string>
+     */
+    private function resolvePendingQuestionIds(array $sessions): array
+    {
+        try {
+            $store = app(OpencodeSessionStore::class);
+
+            $questionIds = [];
+
+            foreach ($sessions as $session) {
+                $state = $store->sessionState($session['id']);
+
+                if (($state['last_turn_tool'] ?? null) === 'question') {
+                    $questionIds[] = (string) $session['id'];
+                }
+            }
+
+            return $questionIds;
+        } catch (Throwable $e) {
+            Log::warning("Failed to detect opencode sessions awaiting a question: {$e->getMessage()}");
+
+            return [];
         }
     }
 
@@ -285,21 +339,26 @@ class BotAgent implements Agent, Conversational, HasTools
      *
      * @param  list<array{id: string, title: ?string, directory: ?string, time_updated: ?int, parent_id: ?string}>  $sessions
      * @param  list<string>  $workingIds
+     * @param  list<string>  $questionIds
      */
-    private function formatActiveSessionsBlock(array $sessions, array $workingIds): string
+    private function formatActiveSessionsBlock(array $sessions, array $workingIds, array $questionIds): string
     {
         $lines = array_map(
-            function (array $session) use ($workingIds): string {
+            function (array $session) use ($workingIds, $questionIds): string {
                 $title = ($session['title'] !== null && $session['title'] !== '')
                     ? $session['title']
                     : '(untitled session)';
+
+                $status = in_array($session['id'], $questionIds, true)
+                    ? 'esperando tu respuesta (tiene preguntas)'
+                    : (in_array($session['id'], $workingIds, true) ? 'working' : 'idle');
 
                 return sprintf(
                     '- "%s" — %s (last activity %s, %s)',
                     $title,
                     $session['directory'] ?? '(unknown directory)',
                     $this->formatLastActivity($session['time_updated']),
-                    in_array($session['id'], $workingIds, true) ? 'working' : 'idle',
+                    $status,
                 );
             },
             $sessions,

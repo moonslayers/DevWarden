@@ -64,9 +64,10 @@ class TelegramClient
      * Send a message to the given chat.
      *
      * @param  string|null  $parseMode  Optional parse mode ('HTML', 'Markdown', etc.).
+     * @param  array<string, mixed>|null  $replyMarkup  Optional Telegram reply_markup (e.g. an inline keyboard); passed through unvalidated.
      * @return array<string, mixed> The Telegram "Message" result payload.
      */
-    public function sendMessage(int|string $chatId, string $text, ?string $parseMode = null): array
+    public function sendMessage(int|string $chatId, string $text, ?string $parseMode = null, ?array $replyMarkup = null): array
     {
         $params = [
             'chat_id' => $chatId,
@@ -77,7 +78,34 @@ class TelegramClient
             $params['parse_mode'] = $parseMode;
         }
 
+        if ($replyMarkup !== null) {
+            $params['reply_markup'] = $replyMarkup;
+        }
+
         return (array) $this->request('sendMessage', $params);
+    }
+
+    /**
+     * Answer a callback query (dismisses the button spinner) sent with an inline keyboard.
+     *
+     * @param  string|null  $text  Optional notification text shown to the user.
+     * @return bool Whether Telegram accepted the answer.
+     */
+    public function answerCallbackQuery(string $callbackQueryId, ?string $text = null, bool $showAlert = false): bool
+    {
+        $params = [
+            'callback_query_id' => $callbackQueryId,
+        ];
+
+        if ($text !== null) {
+            $params['text'] = $text;
+        }
+
+        if ($showAlert) {
+            $params['show_alert'] = true;
+        }
+
+        return (bool) $this->request('answerCallbackQuery', $params);
     }
 
     /**
@@ -239,7 +267,7 @@ class TelegramClient
 
     /**
      * @param  array<string, mixed>  $data
-     * @return array{update_id: int, chat_id?: int|string, message_id?: int, text?: string, photo?: string, edit?: bool}
+     * @return array{update_id: int, chat_id?: int|string, message_id?: int, text?: string, photo?: string, edit?: bool, callback_query_id?: string, callback_data?: string, callback_message_id?: int|null}
      */
     private function normalizeUpdate(array $data): array
     {
@@ -256,7 +284,7 @@ class TelegramClient
         }
 
         if ($message === null) {
-            return $normalized;
+            return $this->normalizeCallbackQuery($normalized, $update);
         }
 
         $normalized['chat_id'] = $message->getChat()->getId();
@@ -279,6 +307,52 @@ class TelegramClient
 
             $normalized['photo'] = $this->largestPhotoFileId($photoSizes);
         }
+
+        return $normalized;
+    }
+
+    /**
+     * Normalize an inline-keyboard callback query.
+     *
+     * The chat is taken from the bot's own message that holds the buttons (the
+     * message the user tapped on); when that is absent (inline-mode button) the
+     * sender's user id is used as a fallback so the poller can still authorize
+     * or discard the callback. The shape follows the
+     * oq:{session_id}:{question_index}:{option_index} contract expected by the
+     * callback pipeline; updates of any other kind return just the update_id
+     * (and are discarded by the poller, which always advances the offset).
+     *
+     * @param  array{update_id: int}  $normalized
+     * @return array{update_id: int, chat_id?: int|string, message_id?: int, text?: string, photo?: string, edit?: bool, callback_query_id?: string, callback_data?: string, callback_message_id?: int|null}
+     */
+    private function normalizeCallbackQuery(array $normalized, Update $update): array
+    {
+        $callback = $update->getCallbackQuery();
+
+        if ($callback === null) {
+            return $normalized;
+        }
+
+        $chatId = null;
+        $messageId = null;
+
+        $message = $callback->getMessage();
+
+        if ($message !== null) {
+            $chatId = $message->getChat()->getId();
+            $messageId = (int) $message->getMessageId();
+        } elseif ($callback->getFrom() !== null) {
+            $chatId = (int) $callback->getFrom()->getId();
+        }
+
+        $normalized['callback_query_id'] = $callback->getId();
+
+        if ($chatId !== null) {
+            $normalized['chat_id'] = $chatId;
+        }
+
+        $normalized['callback_data'] = $callback->getData() !== null ? (string) $callback->getData() : '';
+        $normalized['callback_message_id'] = $messageId;
 
         return $normalized;
     }

@@ -36,6 +36,19 @@ use function Pest\Laravel\mock;
 
 uses(RefreshDatabase::class);
 
+function botAgentSessionState(string $lastTurnTool): array
+{
+    return [
+        'title' => null,
+        'directory' => null,
+        'time_updated' => null,
+        'has_running_part' => true,
+        'has_error_part' => false,
+        'has_any_part' => true,
+        'last_turn_tool' => $lastTurnTool,
+    ];
+}
+
 beforeEach(function () {
     $this->owner = User::factory()->create();
 
@@ -327,6 +340,60 @@ test('respond marks a session as working when its watch reports it as working', 
         $idleLine = preg_match('/- "Idle task" — .*\(last activity .*, idle\)/', $prompt->prompt) === 1;
 
         return $workingLine && $idleLine;
+    });
+});
+
+test('respond marks a session as awaiting a question when its last live tool is the question tool', function () {
+    $store = mock(OpencodeSessionStore::class);
+    $store->shouldReceive('activeSessions')->andReturn([
+        ['id' => 'ses_question', 'title' => 'Session waiting', 'directory' => '/home/junior/Projects/DevWarden', 'time_updated' => now()->getTimestampMs(), 'parent_id' => null],
+        ['id' => 'ses_work', 'title' => 'Building feature', 'directory' => '/home/junior/Projects/s2c', 'time_updated' => now()->subMinutes(5)->getTimestampMs(), 'parent_id' => null],
+        ['id' => 'ses_idle', 'title' => 'Idle task', 'directory' => '/home/junior/Projects/other', 'time_updated' => now()->subMinutes(10)->getTimestampMs(), 'parent_id' => null],
+    ]);
+    $store->shouldReceive('sessionState')->andReturnUsing(
+        fn (string $id): array => botAgentSessionState($id === 'ses_question' ? 'question' : 'bash'),
+    );
+    app()->instance(OpencodeSessionStore::class, $store);
+
+    OpencodeSessionWatch::factory()->create([
+        'session_id' => 'ses_work',
+        'last_seen_status' => 'working',
+    ]);
+
+    BotAgent::fake(['Reply from the bot.']);
+
+    app(BotAgent::class)->respond(123456789, 'Hello', $this->owner);
+
+    BotAgent::assertPrompted(function (AgentPrompt $prompt): bool {
+        return preg_match('/- "Session waiting" — .*\(last activity .*, esperando tu respuesta \(tiene preguntas\)\)/', $prompt->prompt) === 1
+            && preg_match('/- "Building feature" — .*\(last activity .*, working\)/', $prompt->prompt) === 1
+            && preg_match('/- "Idle task" — .*\(last activity .*, idle\)/', $prompt->prompt) === 1;
+    });
+});
+
+test('respond keeps the block working when sessionState fails for a session', function () {
+    $store = mock(OpencodeSessionStore::class);
+    $store->shouldReceive('activeSessions')->andReturn([
+        ['id' => 'ses_work', 'title' => 'Building feature', 'directory' => '/home/junior/Projects/DevWarden', 'time_updated' => now()->getTimestampMs(), 'parent_id' => null],
+    ]);
+    $store->shouldReceive('sessionState')->andThrow(new RuntimeException('Store unavailable.'));
+    app()->instance(OpencodeSessionStore::class, $store);
+
+    OpencodeSessionWatch::factory()->create([
+        'session_id' => 'ses_work',
+        'last_seen_status' => 'working',
+    ]);
+
+    BotAgent::fake(['Reply from the bot.']);
+
+    $reply = app(BotAgent::class)->respond(123456789, 'Hello', $this->owner);
+
+    expect($reply)->toBe('Reply from the bot.');
+
+    BotAgent::assertPrompted(function (AgentPrompt $prompt): bool {
+        return str_contains($prompt->prompt, '<active_opencode_sessions>')
+            && preg_match('/- "Building feature" — .*\(last activity .*, working\)/', $prompt->prompt) === 1
+            && ! str_contains($prompt->prompt, 'tiene preguntas');
     });
 });
 

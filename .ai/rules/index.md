@@ -16,6 +16,7 @@ Before planning or editing, find the row whose globs match the file's path and r
 | app/Services/Embedding/**,app/Jobs/** | .ai/rules/embedding-jobs.md |
 | app/Services/Embedding/**,bin/dev-full.sh | .ai/rules/embedding.md |
 | app/Http/Controllers/Settings/**,resources/js/pages/settings/**,tests/Feature/Settings/** | .ai/rules/feature-settings.md |
+| resources/js/pages/Skills.vue,tests/Feature/** | .ai/rules/feature.md |
 | app/Jobs/**,app/Services/Telegram/** | .ai/rules/jobs-services-telegram.md |
 | app/Jobs/**, app/Jobs/CaptureBotMemory.php, app/Jobs/ProcessTelegramPendingBatch.php | .ai/rules/jobs.md |
 | app/Http/Requests/Settings/*,resources/js/pages/settings/** | .ai/rules/js-pages-settings.md |

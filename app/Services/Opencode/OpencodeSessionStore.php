@@ -142,7 +142,15 @@ class OpencodeSessionStore
     /**
      * Resolve the metadata and part status flags for a single session.
      *
-     * @return array{title: ?string, directory: ?string, time_updated: ?int, has_running_part: bool, has_error_part: bool, has_any_part: bool}
+     * A running part only counts as live when it started AFTER the last
+     * step-finish of the session: opencode leaves stale running parts behind
+     * forever (a question answered long ago never flips to completed, aborted
+     * tasks keep time.end null), so any running part older than the most
+     * recent step-finish is a zombie and must not mark the session as working.
+     * last_turn_tool is the tool name of the most recent live running part,
+     * or null when the session has no live running part.
+     *
+     * @return array{title: ?string, directory: ?string, time_updated: ?int, has_running_part: bool, has_error_part: bool, has_any_part: bool, last_turn_tool: ?string}
      */
     public function sessionState(string $sessionId): array
     {
@@ -157,13 +165,33 @@ class OpencodeSessionStore
                         SELECT 1 FROM part
                         WHERE part.session_id = session.id
                           AND json_extract(part.data, '$.state.status') = 'running'
+                          AND part.time_created > (
+                              SELECT COALESCE(MAX(step_finish.time_created), 0)
+                              FROM part AS step_finish
+                              WHERE step_finish.session_id = session.id
+                                AND json_extract(step_finish.data, '$.type') = 'step-finish'
+                          )
                     ) AS has_running_part,
                     EXISTS(
                         SELECT 1 FROM part
                         WHERE part.session_id = session.id
                           AND json_extract(part.data, '$.type') = 'tool'
                           AND json_extract(part.data, '$.state.status') = 'error'
-                    ) AS has_error_part
+                    ) AS has_error_part,
+                    (
+                        SELECT json_extract(live_tool.data, '$.tool')
+                        FROM part AS live_tool
+                        WHERE live_tool.session_id = session.id
+                          AND json_extract(live_tool.data, '$.state.status') = 'running'
+                          AND live_tool.time_created > (
+                              SELECT COALESCE(MAX(step_finish.time_created), 0)
+                              FROM part AS step_finish
+                              WHERE step_finish.session_id = session.id
+                                AND json_extract(step_finish.data, '$.type') = 'step-finish'
+                          )
+                        ORDER BY live_tool.time_created DESC, live_tool.rowid DESC
+                        LIMIT 1
+                    ) AS last_turn_tool
                 FROM session
                 WHERE session.id = ?
                 SQL);
@@ -182,6 +210,7 @@ class OpencodeSessionStore
                 'has_running_part' => (bool) $row['has_running_part'],
                 'has_error_part' => (bool) $row['has_error_part'],
                 'has_any_part' => (bool) $row['has_any_part'],
+                'last_turn_tool' => $row['last_turn_tool'] !== null ? (string) $row['last_turn_tool'] : null,
             ];
         } catch (Throwable $e) {
             Log::debug('OpencodeSessionStore: failed to resolve session state.', [
@@ -254,6 +283,97 @@ class OpencodeSessionStore
     }
 
     /**
+     * Extract the questions and answer options of the most recent question part.
+     *
+     * opencode stores an interactive question's choices only inside
+     * part.data.state.input.questions[].options[] of the part whose tool is
+     * 'question'; the MCP transcript never exposes them, so the watcher and the
+     * callback pipeline read them straight from the database. The most recent
+     * question part is used (running or completed), ordered by time_created
+     * then rowid so ties resolve deterministically. Every option is normalized
+     * to {label, description} and questions without at least one valid option
+     * are omitted.
+     *
+     * @return list<array{question: string, options: list<array{label: string, description: ?string}>}>
+     */
+    public function questionOptions(string $sessionId): array
+    {
+        try {
+            $statement = $this->pdo()->prepare(<<<'SQL'
+                SELECT data
+                FROM part
+                WHERE session_id = :session_id
+                  AND json_extract(part.data, '$.tool') = 'question'
+                ORDER BY time_created DESC, rowid DESC
+                LIMIT 1
+                SQL);
+            $statement->execute(['session_id' => $sessionId]);
+
+            $data = $statement->fetchColumn();
+
+            if ($data === false || ! is_string($data) || $data === '') {
+                return [];
+            }
+
+            $decoded = json_decode($data, true);
+
+            if (! is_array($decoded) || ! is_array($decoded['state']['input']['questions'] ?? null)) {
+                return [];
+            }
+
+            $questions = [];
+
+            foreach ($decoded['state']['input']['questions'] as $question) {
+                if (! is_array($question) || ! is_array($question['options'] ?? null)) {
+                    continue;
+                }
+
+                $options = [];
+
+                foreach ($question['options'] as $option) {
+                    if (! is_array($option)) {
+                        continue;
+                    }
+
+                    $label = (string) ($option['label'] ?? '');
+
+                    if ($label === '') {
+                        continue;
+                    }
+
+                    $description = $option['description'] ?? null;
+
+                    $options[] = [
+                        'label' => $label,
+                        'description' => is_string($description) ? $description : null,
+                    ];
+                }
+
+                if ($options === []) {
+                    continue;
+                }
+
+                $title = $question['title'] ?? '';
+
+                $questions[] = [
+                    'question' => is_string($title) ? $title : '',
+                    'options' => $options,
+                ];
+            }
+
+            return $questions;
+        } catch (Throwable $e) {
+            Log::debug('OpencodeSessionStore: failed to resolve question options.', [
+                'session_id' => $sessionId,
+                'db_path' => $this->dbPath(),
+                'error' => $e->getMessage(),
+            ]);
+
+            return [];
+        }
+    }
+
+    /**
      * Resolve the opencode database path.
      *
      * The constructor override wins, then the configured data_db_path setting,
@@ -277,7 +397,7 @@ class OpencodeSessionStore
     }
 
     /**
-     * @return array{title: null, directory: null, time_updated: null, has_running_part: false, has_error_part: false, has_any_part: false}
+     * @return array{title: null, directory: null, time_updated: null, has_running_part: false, has_error_part: false, has_any_part: false, last_turn_tool: null}
      */
     protected function emptyState(): array
     {
@@ -288,6 +408,7 @@ class OpencodeSessionStore
             'has_running_part' => false,
             'has_error_part' => false,
             'has_any_part' => false,
+            'last_turn_tool' => null,
         ];
     }
 

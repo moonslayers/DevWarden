@@ -16,3 +16,6 @@ Telegram only renders format when parse_mode is set; the AI agent produces Markd
 
 ## normalizeUpdate exposes message_id and edit flag (edited_message supported)
 TelegramClient::normalizeUpdate now parses edited_message via Update::getEditedMessage() and returns arrays {update_id, chat_id?, message_id?, text?, edit?}: regular messages carry message_id without edit; edited messages carry the same message_id, the new text and edit=true. The debounce buffer keys pending rows on (chat_id, message_id) so edits upsert in place; bot_memories.source_message_id is STILL the Telegram update_id, never message_id.
+
+## normalizeUpdate callback_query shape: chat from the bot's message, sender id fallback
+TelegramClient::normalizeUpdate turns an inline-button callback into {update_id, callback_query_id, chat_id?, callback_data, callback_message_id?}. chat_id is the bot message's chat (the tapped message), falling back to the sender's user id when there is no message (inline mode); callback_message_id is null in that case. callback_data is the raw button payload (may be ''). Any non-oq callback is normalized the same way and discarded by the poller, which always advances the offset.

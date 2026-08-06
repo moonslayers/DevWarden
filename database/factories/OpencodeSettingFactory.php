@@ -22,6 +22,7 @@ class OpencodeSettingFactory extends Factory
             'mcp_command' => 'opencode-mcp',
             'data_db_path' => '/tmp/devwarden-test/opencode.db',
             'session_watch_since' => null,
+            'session_watch_boot_reported_at' => null,
         ];
     }
 }
