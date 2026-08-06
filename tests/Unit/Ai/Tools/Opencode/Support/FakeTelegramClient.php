@@ -13,7 +13,7 @@ use App\Services\Telegram\TelegramClient;
  */
 class FakeTelegramClient extends TelegramClient
 {
-    /** @var array<int, array{chat_id: int|string, text: string, parse_mode: ?string, reply_markup?: array<string, mixed>}> */
+    /** @var array<int, array{chat_id: int|string, text: string, parse_mode: ?string}> */
     public array $sent = [];
 
     public ?TelegramApiException $error = null;
@@ -23,17 +23,13 @@ class FakeTelegramClient extends TelegramClient
         //
     }
 
-    public function sendMessage(int|string $chatId, string $text, ?string $parseMode = null, ?array $replyMarkup = null): array
+    public function sendMessage(int|string $chatId, string $text, ?string $parseMode = null): array
     {
         if ($this->error !== null) {
             throw $this->error;
         }
 
         $message = ['chat_id' => $chatId, 'text' => $text, 'parse_mode' => $parseMode];
-
-        if ($replyMarkup !== null) {
-            $message['reply_markup'] = $replyMarkup;
-        }
 
         $this->sent[] = $message;
 

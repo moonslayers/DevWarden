@@ -130,7 +130,7 @@ test('getUpdates omits chat_id and text when the update has no message', functio
     ]);
 });
 
-test('getUpdates normalizes a callback query into the callback pipeline shape', function () {
+test('getUpdates normalizes a callback query update as an update without a message', function () {
     $container = [];
     $client = telegramClientWithMock([
         json_encode(['ok' => true, 'result' => [
@@ -154,86 +154,7 @@ test('getUpdates normalizes a callback query into the callback pipeline shape', 
     $updates = $client->getUpdates();
 
     expect($updates)->toBe([
-        ['update_id' => 11223350, 'callback_query_id' => '4382bfdwdsd323', 'chat_id' => 123456789, 'callback_data' => 'oq:ses_abc:0:1', 'callback_message_id' => 42],
-    ]);
-});
-
-test('getUpdates falls back to the sender user id for a callback query without a message', function () {
-    $container = [];
-    $client = telegramClientWithMock([
-        json_encode(['ok' => true, 'result' => [
-            [
-                'update_id' => 11223351,
-                'callback_query' => [
-                    'id' => 'cb-inline-1',
-                    'from' => ['id' => 555666777, 'is_bot' => false, 'first_name' => 'Inline'],
-                    'inline_message_id' => 'AQADxyz',
-                    'chat_instance' => '-1000000000000',
-                    'data' => 'oq:ses_def:1:0',
-                ],
-            ],
-        ]]),
-    ], $container);
-
-    $updates = $client->getUpdates();
-
-    expect(array_key_exists('callback_message_id', $updates[0]))->toBeTrue();
-    expect($updates[0]['callback_message_id'])->toBeNull();
-    expect($updates)->toBe([
-        ['update_id' => 11223351, 'callback_query_id' => 'cb-inline-1', 'chat_id' => 555666777, 'callback_data' => 'oq:ses_def:1:0', 'callback_message_id' => null],
-    ]);
-});
-
-test('getUpdates returns only the update id for a callback query without chat information', function () {
-    $container = [];
-    $client = telegramClientWithMock([
-        json_encode(['ok' => true, 'result' => [
-            [
-                'update_id' => 11223352,
-                'callback_query' => [
-                    'id' => 'cb-lonely',
-                    'from' => ['id' => 555666777, 'is_bot' => false, 'first_name' => 'Ghost'],
-                    'inline_message_id' => 'AQADxyz',
-                    'chat_instance' => '-1000000000000',
-                    'game_short_name' => 'game',
-                ],
-            ],
-        ]]),
-    ], $container);
-
-    $updates = $client->getUpdates();
-
-    expect(array_key_exists('chat_id', $updates[0]))->toBeTrue();
-    expect(array_key_exists('callback_message_id', $updates[0]))->toBeTrue();
-    expect($updates)->toBe([
-        ['update_id' => 11223352, 'callback_query_id' => 'cb-lonely', 'chat_id' => 555666777, 'callback_data' => '', 'callback_message_id' => null],
-    ]);
-});
-
-test('getUpdates treats a callback query with null data as empty callback_data', function () {
-    $container = [];
-    $client = telegramClientWithMock([
-        json_encode(['ok' => true, 'result' => [
-            [
-                'update_id' => 11223353,
-                'callback_query' => [
-                    'id' => 'cb-nodata',
-                    'from' => ['id' => 555666777, 'is_bot' => false, 'first_name' => 'Null'],
-                    'message' => [
-                        'message_id' => 43,
-                        'date' => 1722800000,
-                        'chat' => ['id' => 123456789, 'type' => 'private'],
-                    ],
-                    'chat_instance' => '-1000000000000',
-                ],
-            ],
-        ]]),
-    ], $container);
-
-    $updates = $client->getUpdates();
-
-    expect($updates)->toBe([
-        ['update_id' => 11223353, 'callback_query_id' => 'cb-nodata', 'chat_id' => 123456789, 'callback_data' => '', 'callback_message_id' => 43],
+        ['update_id' => 11223350],
     ]);
 });
 
@@ -283,94 +204,6 @@ test('sendMessage includes parse_mode in the body when one is provided', functio
         'parse_mode' => 'HTML',
     ]);
     expect($result)->toBe(['message_id' => 44, 'text' => 'Ok']);
-});
-
-test('sendMessage includes reply_markup in the body when one is provided', function () {
-    $container = [];
-    $client = telegramClientWithMock([
-        json_encode(['ok' => true, 'result' => ['message_id' => 45, 'text' => 'Ok']]),
-    ], $container);
-
-    $replyMarkup = [
-        'inline_keyboard' => [
-            [['text' => 'Sí', 'callback_data' => 'oc:ses_abc:0:0']],
-        ],
-    ];
-
-    $client->sendMessage(123456789, 'Respuesta', 'HTML', $replyMarkup);
-
-    $sent = json_decode((string) $container[0]['request']->getBody(), true);
-
-    expect($sent)->toBe([
-        'chat_id' => 123456789,
-        'text' => 'Respuesta',
-        'parse_mode' => 'HTML',
-        'reply_markup' => $replyMarkup,
-    ]);
-});
-
-test('sendMessage omits reply_markup from the body when none is provided', function () {
-    $container = [];
-    $client = telegramClientWithMock([
-        json_encode(['ok' => true, 'result' => ['message_id' => 46, 'text' => 'Ok']]),
-    ], $container);
-
-    $client->sendMessage(123456789, 'Respuesta', 'HTML');
-
-    $sent = json_decode((string) $container[0]['request']->getBody(), true);
-
-    expect(array_key_exists('reply_markup', $sent))->toBeFalse();
-    expect($sent)->toBe([
-        'chat_id' => 123456789,
-        'text' => 'Respuesta',
-        'parse_mode' => 'HTML',
-    ]);
-});
-
-test('answerCallbackQuery posts to the answerCallbackQuery endpoint with the expected payload', function () {
-    $container = [];
-    $client = telegramClientWithMock([
-        json_encode(['ok' => true, 'result' => true]),
-    ], $container);
-
-    $result = $client->answerCallbackQuery('cb-123');
-
-    $request = $container[0]['request'];
-    $sent = json_decode((string) $request->getBody(), true);
-
-    expect((string) $request->getUri())->toBe('https://api.telegram.org/bot'.TelegramSetting::singleton()->bot_token.'/answerCallbackQuery');
-    expect($sent)->toBe(['callback_query_id' => 'cb-123']);
-    expect(array_key_exists('text', $sent))->toBeFalse();
-    expect(array_key_exists('show_alert', $sent))->toBeFalse();
-    expect($result)->toBeTrue();
-});
-
-test('answerCallbackQuery includes text and show_alert flags when provided', function () {
-    $container = [];
-    $client = telegramClientWithMock([
-        json_encode(['ok' => true, 'result' => true]),
-    ], $container);
-
-    $result = $client->answerCallbackQuery('cb-456', 'Opción enviada', showAlert: true);
-
-    $sent = json_decode((string) $container[0]['request']->getBody(), true);
-
-    expect($sent)->toBe([
-        'callback_query_id' => 'cb-456',
-        'text' => 'Opción enviada',
-        'show_alert' => true,
-    ]);
-    expect($result)->toBeTrue();
-});
-
-test('answerCallbackQuery throws TelegramApiException on a non-ok payload', function () {
-    $container = [];
-    $client = telegramClientWithMock([
-        json_encode(['ok' => false, 'error_code' => 400, 'description' => 'Bad Request: query is too old']),
-    ], $container);
-
-    expect(fn () => $client->answerCallbackQuery('cb-stale'))
-        ->toThrow(TelegramApiException::class, 'Telegram API request \'answerCallbackQuery\' failed: Bad Request: query is too old');
 });
 
 test('setMyCommands sends the expected commands payload', function () {

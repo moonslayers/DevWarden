@@ -80,7 +80,7 @@ function sessionWatcherState(array $overrides = []): array
  * @param  array<string, bool>  $terminalErrors
  * @param  array<int, array{id?: string, sessionId?: string, permissionId?: string, text: string}>  $permissions
  * @param  array<string, string>  $conversations
- * @param  array<int, array{chat_id: int, text: string, keyboard?: ?array}>  $messages
+ * @param  array<int, array{chat_id: int, text: string, keyboard: ?array}>  $messages
  * @param  list<string>  $storeThrows
  * @param  array<string, list<array{question: string, options: list<array{label: string, description: ?string}>}>>  $questionOptions
  */
@@ -136,8 +136,8 @@ function sessionWatcherService(
     $messages ??= [];
     $notifier = mock(OpencodeNotifier::class);
     $notifier->shouldReceive('notify')->andReturnUsing(
-        function (int $chatId, string $markdown, ?array $keyboard = null) use (&$messages, $onNotify): bool {
-            $messages[] = ['chat_id' => $chatId, 'text' => $markdown, 'keyboard' => $keyboard];
+        function (int $chatId, string $markdown) use (&$messages, $onNotify): bool {
+            $messages[] = ['chat_id' => $chatId, 'text' => $markdown, 'keyboard' => null];
 
             return $onNotify === null ? true : $onNotify($chatId, $markdown);
         },
@@ -1099,12 +1099,12 @@ test('initializes the session watch watermark on the first check and uses it as 
 
     $watermark = OpencodeSetting::singleton()->session_watch_since;
 
-    // The first call is the discovery cutoff at the fresh watermark; the
-    // second is the boot summary re-run with a grace window before it.
+    // Both the discovery and the boot summary re-run apply the same grace
+    // window, so a session idle just before the reset stays discoverable.
     expect($watermark)->not->toBeNull()
         ->and($received)->toHaveCount(2)
         ->and($received[0])->toBeInt()
-        ->and(intdiv($received[0], 1000))->toBe($watermark->getTimestamp())
+        ->and(intdiv($received[0], 1000))->toBe($watermark->getTimestamp() - 5 * 60)
         ->and(intdiv($received[1], 1000))->toBe($watermark->getTimestamp() - 5 * 60);
 });
 
@@ -1135,7 +1135,7 @@ test('keeps a recent session watch watermark without resetting it', function () 
     $watermark = OpencodeSetting::singleton()->session_watch_since;
 
     expect($watermark->getTimestampMs())->toBe($recent->getTimestampMs())
-        ->and($received)->toBe($recent->getTimestampMs());
+        ->and($received)->toBe($recent->getTimestampMs() - 5 * 60 * 1000);
 });
 
 test('resets the session watch watermark when the watcher has not ticked for over ten minutes', function () {
@@ -1164,11 +1164,11 @@ test('resets the session watch watermark when the watcher has not ticked for ove
 
     $watermark = OpencodeSetting::singleton()->session_watch_since;
 
-    // Discovery uses the fresh watermark; the boot summary re-run uses a grace
-    // window five minutes before it.
+    // Both the discovery and the boot summary re-run apply the same grace
+    // window; the reset also re-arms the boot summary marker.
     expect($watermark)->not->toBeNull()
         ->and($received)->toHaveCount(2)
-        ->and(intdiv($received[0], 1000))->toBe($watermark->getTimestamp())
+        ->and(intdiv($received[0], 1000))->toBe($watermark->getTimestamp() - 5 * 60)
         ->and(intdiv($received[1], 1000))->toBe($watermark->getTimestamp() - 5 * 60)
         ->and($watermark->isAfter($stale))->toBeTrue();
 });
@@ -1197,6 +1197,29 @@ test('does not discover a session updated before the session watch watermark', f
     $service->check();
 
     expect(OpencodeSessionWatch::where('session_id', 'ses_old')->exists())->toBeFalse();
+});
+
+test('discovers a session idle just before the watermark reset (discovery grace window)', function () {
+    sessionWatcherOwnerChat();
+
+    $watermark = now()->subMinutes(2)->startOfSecond();
+    OpencodeSetting::singleton()->update(['session_watch_since' => $watermark]);
+
+    $path = opencodeWatcherFixture([
+        ['id' => 'ses_grace', 'title' => 'Grace', 'directory' => '/home/junior/Projects/DevWarden', 'time_updated' => $watermark->subMinute()->getTimestampMs()],
+    ]);
+
+    $store = new OpencodeSessionStore($path);
+    $manager = mock(OpencodeSessionManager::class);
+    $manager->shouldReceive('pendingPermissions')->andReturn([]);
+
+    $notifier = mock(OpencodeNotifier::class);
+
+    $service = new OpencodeSessionWatcher($store, $manager, $notifier, new OpencodeSessionParser);
+
+    $service->check();
+
+    expect(OpencodeSessionWatch::where('session_id', 'ses_grace')->exists())->toBeTrue();
 });
 
 test('falls back to discovering all sessions when the watermark cannot be resolved', function () {
@@ -1252,7 +1275,7 @@ test('sends one boot summary for sessions active since a restart and never repea
     expect(OpencodeSetting::singleton()->session_watch_boot_reported_at)->not->toBeNull();
 });
 
-test('boot summary marks a live question turn as waiting for the answer', function () {
+test('boot summary does not list a session waiting for an answer; its question turn is sent instead', function () {
     sessionWatcherOwnerChat();
     OpencodeSetting::singleton()->update([
         'session_watch_since' => now()->subMinutes(15),
@@ -1265,13 +1288,59 @@ test('boot summary marks a live question turn as waiting for the answer', functi
             ['id' => 'ses_q', 'title' => 'Ask me', 'directory' => '/home/junior/Projects/DevWarden', 'time_updated' => sessionWatcherFresh()],
         ],
         states: ['ses_q' => sessionWatcherState(['has_running_part' => true, 'last_turn_tool' => 'question'])],
+        conversations: ['ses_q' => sessionWatcherTranscript('¿Aplico los cambios?')],
         messages: $messages,
     );
 
     $service->check();
+    $service->check();
 
+    // The waiting session is excluded from the summary (only working sessions
+    // are listed); its question turn is notified separately with the question.
     expect($messages)->toHaveCount(1)
-        ->and($messages[0]['text'])->toContain('- Ask me (/home/junior/Projects/DevWarden) — esperando respuesta');
+        ->and($messages[0]['text'])->toContain('tiene preguntas.')
+        ->and($messages[0]['text'])->toContain('¿Aplico los cambios?')
+        ->and($messages[0]['text'])->not->toContain('Sesiones activas desde el inicio del servidor:');
+});
+
+test('sends the question turn alongside the boot summary on the first tick after a restart', function () {
+    sessionWatcherOwnerChat();
+    OpencodeSetting::singleton()->update([
+        'session_watch_since' => now()->subMinutes(15),
+        'session_watch_boot_reported_at' => null,
+    ]);
+
+    $messages = [];
+    $service = sessionWatcherService(
+        sessions: [
+            ['id' => 'ses_boot_q', 'title' => 'Boot question', 'directory' => '/home/junior/Projects/DevWarden', 'time_updated' => sessionWatcherFresh()],
+            ['id' => 'ses_work', 'title' => 'Working', 'directory' => '/home/junior/Projects/DevWarden', 'time_updated' => sessionWatcherFresh()],
+        ],
+        states: [
+            'ses_boot_q' => sessionWatcherState(['has_running_part' => true, 'last_turn_tool' => 'question']),
+            'ses_work' => sessionWatcherState(['has_running_part' => true]),
+        ],
+        conversations: ['ses_boot_q' => sessionWatcherTranscript('¿Confirmas la ruta del proyecto?')],
+        messages: $messages,
+    );
+
+    $service->check();
+    $service->check();
+
+    // The boot summary lists the working session only; the waiting session
+    // gets its dedicated question-turn message with the actual question.
+    expect($messages)->toHaveCount(2);
+
+    $summary = collect($messages)->first(fn (array $m): bool => str_contains($m['text'], 'Sesiones activas desde el inicio del servidor:'));
+    $question = collect($messages)->first(fn (array $m): bool => str_contains($m['text'], 'tiene preguntas.'));
+
+    expect($summary)->not->toBeNull()
+        ->and($summary['text'])->toContain('- Working (/home/junior/Projects/DevWarden) — trabajando')
+        ->and($summary['text'])->not->toContain('Boot question');
+
+    expect($question)->not->toBeNull()
+        ->and($question['text'])->toContain('Boot question')
+        ->and($question['text'])->toContain('¿Confirmas la ruta del proyecto?');
 });
 
 test('does not emit a boot summary when no session is active since the restart', function () {
@@ -1648,7 +1717,7 @@ test('keeps the plain question notification when the session has no answer optio
         ->and($messages[0]['keyboard'])->toBeNull();
 });
 
-test('notifies finished with the question options and an inline keyboard', function () {
+test('notifies finished with the question options as plain text', function () {
     $chatId = sessionWatcherOwnerChat();
     OpencodeSessionWatch::factory()->create([
         'session_id' => 'ses_finished_opts',
@@ -1684,15 +1753,8 @@ test('notifies finished with the question options and an inline keyboard', funct
         ->and($messages[0]['text'])->toContain('Pregunta 1: ¿Confirmas la ruta del proyecto?')
         ->and($messages[0]['text'])->toContain('(a) Sí')
         ->and($messages[0]['text'])->toContain('(b) No')
-        ->and($messages[0]['text'])->toContain('Toca un botón para responder.')
-        ->and($messages[0]['keyboard'])->toBe([
-            'inline_keyboard' => [
-                [
-                    ['text' => 'Sí', 'callback_data' => 'oq:ses_finished_opts:0:0'],
-                    ['text' => 'No', 'callback_data' => 'oq:ses_finished_opts:0:1'],
-                ],
-            ],
-        ]);
+        ->and($messages[0]['text'])->not->toContain('Toca un botón para responder.')
+        ->and($messages[0]['keyboard'])->toBeNull();
 
     $watch = OpencodeSessionWatch::where('session_id', 'ses_finished_opts')->first();
 
@@ -1701,7 +1763,7 @@ test('notifies finished with the question options and an inline keyboard', funct
         ->and($watch->notified_at)->not->toBeNull();
 });
 
-test('notifies a live question turn with the options and an inline keyboard', function () {
+test('notifies a live question turn with the options as plain text', function () {
     $chatId = sessionWatcherOwnerChat();
     OpencodeSessionWatch::factory()->create([
         'session_id' => 'ses_turn_opts',
@@ -1732,18 +1794,13 @@ test('notifies a live question turn with the options and an inline keyboard', fu
     $service->check();
 
     expect($messages)->toHaveCount(1)
+        ->and($messages[0]['text'])->toContain('La sesión de opencode "Live question" tiene preguntas.')
         ->and($messages[0]['text'])->toContain('Sesión: ses_turn_opts')
         ->and($messages[0]['text'])->toContain('Pregunta 1: ¿Aplico los cambios?')
         ->and($messages[0]['text'])->toContain('(a) Aplicar')
         ->and($messages[0]['text'])->toContain('(b) Cancelar')
-        ->and($messages[0]['keyboard'])->toBe([
-            'inline_keyboard' => [
-                [
-                    ['text' => 'Aplicar', 'callback_data' => 'oq:ses_turn_opts:0:0'],
-                    ['text' => 'Cancelar', 'callback_data' => 'oq:ses_turn_opts:0:1'],
-                ],
-            ],
-        ]);
+        ->and($messages[0]['text'])->not->toContain('Toca un botón para responder.')
+        ->and($messages[0]['keyboard'])->toBeNull();
 
     $watch = OpencodeSessionWatch::where('session_id', 'ses_turn_opts')->first();
 
@@ -1752,7 +1809,7 @@ test('notifies a live question turn with the options and an inline keyboard', fu
         ->and($watch->notified_at)->not->toBeNull();
 });
 
-test('builds one keyboard row per question with base-zero callback indices', function () {
+test('lists every question with its lettered options as plain text', function () {
     $chatId = sessionWatcherOwnerChat();
     OpencodeSessionWatch::factory()->create([
         'session_id' => 'ses_multi_opts',
@@ -1788,22 +1845,15 @@ test('builds one keyboard row per question with base-zero callback indices', fun
     $service->check();
 
     expect($messages)->toHaveCount(1)
+        ->and($messages[0]['text'])->toContain('Sesión: ses_multi_opts')
         ->and($messages[0]['text'])->toContain('Pregunta 1: ¿Primera pregunta?')
         ->and($messages[0]['text'])->toContain('(a) Opción A1')
         ->and($messages[0]['text'])->toContain('(b) Opción A2')
         ->and($messages[0]['text'])->toContain('Pregunta 2: ¿Segunda pregunta?')
         ->and($messages[0]['text'])->toContain('(a) Opción B1')
-        ->and($messages[0]['keyboard'])->toBe([
-            'inline_keyboard' => [
-                [
-                    ['text' => '1a: Opción A1', 'callback_data' => 'oq:ses_multi_opts:0:0'],
-                    ['text' => '1b: Opción A2', 'callback_data' => 'oq:ses_multi_opts:0:1'],
-                ],
-                [
-                    ['text' => '2a: Opción B1', 'callback_data' => 'oq:ses_multi_opts:1:0'],
-                ],
-            ],
-        ]);
+        ->and($messages[0]['text'])->not->toContain('oq:')
+        ->and($messages[0]['text'])->not->toContain('Toca un botón para responder.')
+        ->and($messages[0]['keyboard'])->toBeNull();
 
     $watch = OpencodeSessionWatch::where('session_id', 'ses_multi_opts')->first();
 

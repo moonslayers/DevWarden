@@ -30,3 +30,6 @@ Do NOT bump tries or add backoff to ProcessTelegramPendingBatch: AI failures dis
 
 ## ProcessTelegramPendingBatch: capped drain (5) + owner-null clears pending
 ProcessTelegramPendingBatch drain loop is capped at MAX_DRAIN_ITERATIONS=5 per job: continuous flooding cannot starve the single queue worker, leftover pending rows are re-armed by endProcessing() (which dispatches another batch without delay). When resolveOwner() returns null the job DELETES all pending rows for the chat before returning (instead of leaving them), otherwise scheduleIfNeeded would re-dispatch a job every poll forever (warn-spam + growing buffer). Memory capture is skipped when the reply equals FRIENDLY_ERROR_MESSAGE (matches the retired job's behavior).
+
+## ProcessTelegramPendingBatch timeout + batch atascado
+El job define $timeout = 300 y $tries = 1. El worker corre sin --timeout (default 60s de Laravel) y un drain de IA lenta que exceda el timeout muere con TimeoutExceededException dejando telegram_chat_batches.processing_at puesto → bot mudo hasta el reclaim de 15 min + otro mensaje (scheduleIfNeeded solo re-arma para chats con update nuevo). No bajar el timeout ni reintroducir --timeout sin verificar.

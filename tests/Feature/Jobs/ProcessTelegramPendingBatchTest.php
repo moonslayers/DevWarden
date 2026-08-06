@@ -56,6 +56,13 @@ beforeEach(function () {
     app()->instance(ThinkingIndicator::class, mock(ThinkingIndicator::class));
 });
 
+test('allows the AI generation an explicit generous timeout so slow providers do not kill the drain', function () {
+    $job = new ProcessTelegramPendingBatch(5068985554);
+
+    expect($job->tries)->toBe(1)
+        ->and($job->timeout)->toBe(300);
+});
+
 test('drains two pending messages in one AI call: one placeholder, one combined reply, one memory capture', function () {
     Queue::fake();
 

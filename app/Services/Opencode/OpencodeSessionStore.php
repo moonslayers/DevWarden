@@ -353,10 +353,10 @@ class OpencodeSessionStore
                     continue;
                 }
 
-                $title = $question['title'] ?? '';
+                $text = $question['question'] ?? $question['header'] ?? '';
 
                 $questions[] = [
-                    'question' => is_string($title) ? $title : '',
+                    'question' => is_string($text) ? $text : '',
                     'options' => $options,
                 ];
             }

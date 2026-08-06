@@ -587,14 +587,14 @@ test('questionOptions extracts questions and options from the most recent questi
         ],
         parts: [
             opencodeQuestionPart('part_1', 'ses_question', 3000, [
-                ['title' => 'Stale question', 'options' => [['label' => 'Stale', 'description' => 'old']]],
+                ['question' => 'Stale question', 'options' => [['label' => 'Stale', 'description' => 'old']]],
             ]),
             opencodeQuestionPart('part_2', 'ses_question', 5000, [
-                ['title' => 'Migration approach?', 'options' => [
+                ['question' => 'Migration approach?', 'options' => [
                     ['label' => 'Fresh migration', 'description' => 'Recreate the schema from scratch'],
                     ['label' => 'Incremental'],
                 ]],
-                ['title' => 'Rollout?', 'options' => [
+                ['question' => 'Rollout?', 'options' => [
                     ['label' => 'All at once'],
                 ]],
             ]),
@@ -653,9 +653,9 @@ test('questionOptions skips questions without valid options and normalizes label
         ],
         parts: [
             opencodeQuestionPart('part_1', 'ses_q', 1500, [
-                ['title' => 'No options', 'options' => []],
-                ['title' => 'Bad options', 'options' => [['foo' => 'bar'], ['label' => 42, 'description' => 7]]],
-                ['title' => 'Kept', 'options' => [['label' => 'Go']]],
+                ['question' => 'No options', 'options' => []],
+                ['question' => 'Bad options', 'options' => [['foo' => 'bar'], ['label' => 42, 'description' => 7]]],
+                ['question' => 'Kept', 'options' => [['label' => 'Go']]],
             ]),
         ],
     ));
@@ -663,6 +663,27 @@ test('questionOptions skips questions without valid options and normalizes label
     expect($store->questionOptions('ses_q'))->toBe([
         ['question' => 'Bad options', 'options' => [['label' => '42', 'description' => null]]],
         ['question' => 'Kept', 'options' => [['label' => 'Go', 'description' => null]]],
+    ]);
+});
+
+test('questionOptions falls back to the header field when the question text is missing', function () {
+    $store = new OpencodeSessionStore(OpencodeStoreFixture::create(
+        sessions: [
+            ['id' => 'ses_header', 'title' => 'Header', 'directory' => '/projects/a', 'time_created' => 1000, 'time_updated' => 2000, 'time_archived' => null],
+        ],
+        parts: [
+            opencodeQuestionPart('part_1', 'ses_header', 1500, [
+                ['header' => 'Choose an approach', 'options' => [['label' => 'Fresh', 'description' => 'Recreate the schema']]],
+                ['question' => 'Real question', 'header' => 'Ignored header', 'options' => [['label' => 'Real option']]],
+                ['options' => [['label' => 'No text at all']]],
+            ]),
+        ],
+    ));
+
+    expect($store->questionOptions('ses_header'))->toBe([
+        ['question' => 'Choose an approach', 'options' => [['label' => 'Fresh', 'description' => 'Recreate the schema']]],
+        ['question' => 'Real question', 'options' => [['label' => 'Real option', 'description' => null]]],
+        ['question' => '', 'options' => [['label' => 'No text at all', 'description' => null]]],
     ]);
 });
 

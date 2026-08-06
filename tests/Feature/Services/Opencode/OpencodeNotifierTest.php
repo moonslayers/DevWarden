@@ -19,26 +19,11 @@ function notifier(): OpencodeNotifier
 test('sends the markdown formatted to HTML with parse mode HTML', function () {
     $telegram = mock(TelegramClient::class);
     $telegram->shouldReceive('sendMessage')->once()
-        ->with(123456789, (new TelegramHtmlFormatter)->format('**Hola**'), 'HTML', null)
+        ->with(123456789, (new TelegramHtmlFormatter)->format('**Hola**'), 'HTML')
         ->andReturn([]);
     app()->instance(TelegramClient::class, $telegram);
 
     expect(notifier()->notify(123456789, '**Hola**'))->toBeTrue();
-});
-
-test('passes the inline keyboard to sendMessage as reply markup when provided', function () {
-    $telegram = mock(TelegramClient::class);
-    $keyboard = [
-        'inline_keyboard' => [
-            [['text' => 'Sí', 'callback_data' => 'oc:ses_abc:0:0']],
-        ],
-    ];
-    $telegram->shouldReceive('sendMessage')->once()
-        ->with(123456789, (new TelegramHtmlFormatter)->format('**Hola**'), 'HTML', $keyboard)
-        ->andReturn([]);
-    app()->instance(TelegramClient::class, $telegram);
-
-    expect(notifier()->notify(123456789, '**Hola**', $keyboard))->toBeTrue();
 });
 
 test('returns false and does not send when the markdown formats to empty html', function () {

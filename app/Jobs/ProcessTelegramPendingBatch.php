@@ -67,6 +67,17 @@ class ProcessTelegramPendingBatch implements ShouldQueue
     public int $tries = 1;
 
     /**
+     * Seconds the AI generation may take before the queue worker kills the job.
+     *
+     * The worker runs without --timeout, so Laravel's default 60s would apply
+     * and kill the drain whenever the provider is slow (reasoning models
+     * regularly exceed it). A killed drain leaves the batch stuck in
+     * processing_at until the stale reclaim re-arms it, silencing the bot for
+     * up to the reclaim window — hence the explicit, generous timeout.
+     */
+    public int $timeout = 300;
+
+    /**
      * @param  int  $chatId  The Telegram chat whose pending messages to drain.
      */
     public function __construct(

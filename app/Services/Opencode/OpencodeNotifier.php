@@ -22,7 +22,7 @@ class OpencodeNotifier
         private readonly TelegramHtmlFormatter $formatter,
     ) {}
 
-    public function notify(int $chatId, string $markdown, ?array $inlineKeyboard = null): bool
+    public function notify(int $chatId, string $markdown): bool
     {
         $html = $this->formatter->format($markdown);
 
@@ -39,7 +39,7 @@ class OpencodeNotifier
         }
 
         try {
-            $telegram->sendMessage($chatId, $html, 'HTML', $inlineKeyboard);
+            $telegram->sendMessage($chatId, $html, 'HTML');
         } catch (TelegramApiException $e) {
             Log::warning('Opencode notification failed to send.', ['error' => $e->getMessage()]);
 

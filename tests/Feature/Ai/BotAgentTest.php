@@ -371,6 +371,95 @@ test('respond marks a session as awaiting a question when its last live tool is 
     });
 });
 
+test('respond includes session id and pending question details for a session awaiting a question', function () {
+    $store = mock(OpencodeSessionStore::class);
+    $store->shouldReceive('activeSessions')->andReturn([
+        ['id' => 'ses_question', 'title' => 'Session waiting', 'directory' => '/home/junior/Projects/DevWarden', 'time_updated' => now()->getTimestampMs(), 'parent_id' => null],
+        ['id' => 'ses_idle', 'title' => 'Idle task', 'directory' => '/home/junior/Projects/s2c', 'time_updated' => now()->getTimestampMs(), 'parent_id' => null],
+    ]);
+    $store->shouldReceive('sessionState')->andReturnUsing(
+        fn (string $id): array => botAgentSessionState($id === 'ses_question' ? 'question' : 'bash'),
+    );
+    $store->shouldReceive('questionOptions')->andReturnUsing(
+        fn (string $id): array => $id === 'ses_question' ? [
+            [
+                'question' => 'Migration approach?',
+                'options' => [
+                    ['label' => 'Fresh migration', 'description' => 'Recreate the schema from scratch'],
+                    ['label' => 'Incremental', 'description' => null],
+                ],
+            ],
+            [
+                'question' => 'Rollout?',
+                'options' => [
+                    ['label' => 'All at once', 'description' => null],
+                ],
+            ],
+        ] : [],
+    );
+    app()->instance(OpencodeSessionStore::class, $store);
+
+    BotAgent::fake(['Reply from the bot.']);
+
+    app(BotAgent::class)->respond(123456789, 'Hello', $this->owner);
+
+    BotAgent::assertPrompted(function (AgentPrompt $prompt): bool {
+        return preg_match('/- "Session waiting" — .*\(last activity .*, esperando tu respuesta \(tiene preguntas\)\)/', $prompt->prompt) === 1
+            && str_contains($prompt->prompt, 'session_id: ses_question')
+            && str_contains($prompt->prompt, 'Pending questions:')
+            && str_contains($prompt->prompt, 'Q1: Migration approach?')
+            && str_contains($prompt->prompt, '- Fresh migration')
+            && str_contains($prompt->prompt, '- Incremental')
+            && str_contains($prompt->prompt, 'Q2: Rollout?')
+            && str_contains($prompt->prompt, '- All at once')
+            && ! str_contains($prompt->prompt, 'session_id: ses_idle');
+    });
+});
+
+test('respond degrades to the status-only line when question options are unavailable', function () {
+    $store = mock(OpencodeSessionStore::class);
+    $store->shouldReceive('activeSessions')->andReturn([
+        ['id' => 'ses_question', 'title' => 'Session waiting', 'directory' => '/home/junior/Projects/DevWarden', 'time_updated' => now()->getTimestampMs(), 'parent_id' => null],
+    ]);
+    $store->shouldReceive('sessionState')->andReturnUsing(
+        fn (string $id): array => botAgentSessionState('question'),
+    );
+    $store->shouldReceive('questionOptions')->andReturn([]);
+    app()->instance(OpencodeSessionStore::class, $store);
+
+    BotAgent::fake(['Reply from the bot.']);
+
+    app(BotAgent::class)->respond(123456789, 'Hello', $this->owner);
+
+    BotAgent::assertPrompted(function (AgentPrompt $prompt): bool {
+        return preg_match('/- "Session waiting" — .*\(last activity .*, esperando tu respuesta \(tiene preguntas\)\)/', $prompt->prompt) === 1
+            && ! str_contains($prompt->prompt, 'session_id:')
+            && ! str_contains($prompt->prompt, 'Pending questions:');
+    });
+});
+
+test('respond keeps the status mark when question options resolution throws', function () {
+    $store = mock(OpencodeSessionStore::class);
+    $store->shouldReceive('activeSessions')->andReturn([
+        ['id' => 'ses_question', 'title' => 'Session waiting', 'directory' => '/home/junior/Projects/DevWarden', 'time_updated' => now()->getTimestampMs(), 'parent_id' => null],
+    ]);
+    $store->shouldReceive('sessionState')->andReturnUsing(
+        fn (string $id): array => botAgentSessionState('question'),
+    );
+    $store->shouldReceive('questionOptions')->andThrow(new RuntimeException('Store unavailable.'));
+    app()->instance(OpencodeSessionStore::class, $store);
+
+    BotAgent::fake(['Reply from the bot.']);
+
+    app(BotAgent::class)->respond(123456789, 'Hello', $this->owner);
+
+    BotAgent::assertPrompted(function (AgentPrompt $prompt): bool {
+        return str_contains($prompt->prompt, '<active_opencode_sessions>')
+            && preg_match('/- "Session waiting" — .*\(last activity .*, esperando tu respuesta \(tiene preguntas\)\)/', $prompt->prompt) === 1
+            && ! str_contains($prompt->prompt, 'Pending questions:');
+    });
+});
+
 test('respond keeps the block working when sessionState fails for a session', function () {
     $store = mock(OpencodeSessionStore::class);
     $store->shouldReceive('activeSessions')->andReturn([

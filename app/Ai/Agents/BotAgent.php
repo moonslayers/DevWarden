@@ -285,9 +285,9 @@ class BotAgent implements Agent, Conversational, HasTools
                     ->all(),
             );
 
-            $questionIds = $this->resolvePendingQuestionIds($sessions);
+            $questionDetails = $this->resolvePendingQuestionDetails($sessions);
 
-            return $this->formatActiveSessionsBlock($sessions, $workingIds, $questionIds).PHP_EOL.PHP_EOL.$text;
+            return $this->formatActiveSessionsBlock($sessions, $workingIds, $questionDetails).PHP_EOL.PHP_EOL.$text;
         } catch (Throwable $e) {
             Log::warning("Failed to inject active opencode sessions: {$e->getMessage()}");
 
@@ -296,38 +296,61 @@ class BotAgent implements Agent, Conversational, HasTools
     }
 
     /**
-     * Resolve the ids of active sessions that are waiting for the user's input.
+     * Resolve the pending questions of active sessions awaiting the user's input.
      *
      * A session counts as awaiting a question when its live running tool is the
      * 'question' tool — the same signal the watcher uses to fire the question-turn
-     * notification. The state is read live from the opencode database, so a
-     * freshly-arrived question is flagged immediately and an answered one stops
-     * being flagged even before the watcher clears its last_notified_event
-     * marker. Degrades to no question marks when the store is unavailable, so
-     * the block never breaks over an unreadable session.
+     * notification. Only those sessions pay for a questionOptions() read (normally
+     * one or two, never the whole block), so the pending questions reach the model
+     * while the rest of the list stays cheap. When the options cannot be resolved
+     * the session stays keyed with an empty list, so it still shows the awaiting
+     * question mark and the block degrades to the status-only line. Degrades to no
+     * question marks when the store is unavailable, so the block never breaks.
      *
      * @param  list<array{id: string, title: ?string, directory: ?string, time_updated: ?int, parent_id: ?string}>  $sessions
-     * @return list<string>
+     * @return array<string, list<array{question: string, options: list<array{label: string, description: ?string}>}>>
      */
-    private function resolvePendingQuestionIds(array $sessions): array
+    private function resolvePendingQuestionDetails(array $sessions): array
     {
         try {
             $store = app(OpencodeSessionStore::class);
 
-            $questionIds = [];
+            $questionDetails = [];
 
             foreach ($sessions as $session) {
-                $state = $store->sessionState($session['id']);
+                $id = (string) $session['id'];
 
-                if (($state['last_turn_tool'] ?? null) === 'question') {
-                    $questionIds[] = (string) $session['id'];
+                $state = $store->sessionState($id);
+
+                if (($state['last_turn_tool'] ?? null) !== 'question') {
+                    continue;
                 }
+
+                $questionDetails[$id] = $this->resolveQuestionOptions($store, $id);
             }
 
-            return $questionIds;
+            return $questionDetails;
         } catch (Throwable $e) {
             Log::warning("Failed to detect opencode sessions awaiting a question: {$e->getMessage()}");
 
+            return [];
+        }
+    }
+
+    /**
+     * Resolve a session's interactive answer options, best-effort.
+     *
+     * The store never throws, but the mock-backed call is still guarded so a
+     * single session's failure degrades to no options instead of losing the
+     * whole pending-question map.
+     *
+     * @return list<array{question: string, options: list<array{label: string, description: ?string}>}>
+     */
+    private function resolveQuestionOptions(OpencodeSessionStore $store, string $sessionId): array
+    {
+        try {
+            return $store->questionOptions($sessionId) ?? [];
+        } catch (Throwable) {
             return [];
         }
     }
@@ -337,29 +360,71 @@ class BotAgent implements Agent, Conversational, HasTools
      * model, mirroring the <memories> anti-injection framing so the block can
      * never steer the model as instructions.
      *
+     * Sessions awaiting the user's answer additionally expose their session id
+     * and pending questions with their option labels, so the agent can answer
+     * with an exact option label (or free text) through the OpencodeAskTool. A
+     * pending session with no resolvable options degrades to the status-only
+     * line, exactly like today.
+     *
      * @param  list<array{id: string, title: ?string, directory: ?string, time_updated: ?int, parent_id: ?string}>  $sessions
      * @param  list<string>  $workingIds
-     * @param  list<string>  $questionIds
+     * @param  array<string, list<array{question: string, options: list<array{label: string, description: ?string}>}>>  $questionDetails
      */
-    private function formatActiveSessionsBlock(array $sessions, array $workingIds, array $questionIds): string
+    private function formatActiveSessionsBlock(array $sessions, array $workingIds, array $questionDetails): string
     {
         $lines = array_map(
-            function (array $session) use ($workingIds, $questionIds): string {
+            function (array $session) use ($workingIds, $questionDetails): string {
                 $title = ($session['title'] !== null && $session['title'] !== '')
                     ? $session['title']
                     : '(untitled session)';
 
-                $status = in_array($session['id'], $questionIds, true)
-                    ? 'esperando tu respuesta (tiene preguntas)'
-                    : (in_array($session['id'], $workingIds, true) ? 'working' : 'idle');
+                $id = (string) $session['id'];
 
-                return sprintf(
+                $pending = array_key_exists($id, $questionDetails);
+
+                $status = $pending
+                    ? 'esperando tu respuesta (tiene preguntas)'
+                    : (in_array($id, $workingIds, true) ? 'working' : 'idle');
+
+                $line = sprintf(
                     '- "%s" — %s (last activity %s, %s)',
                     $title,
                     $session['directory'] ?? '(unknown directory)',
                     $this->formatLastActivity($session['time_updated']),
                     $status,
                 );
+
+                if (! $pending) {
+                    return $line;
+                }
+
+                $questions = $questionDetails[$id] ?? [];
+
+                if ($questions === []) {
+                    return $line;
+                }
+
+                $questionLines = [];
+
+                foreach ($questions as $questionIndex => $question) {
+                    $text = $question['question'] !== ''
+                        ? $question['question']
+                        : '(question '.($questionIndex + 1).')';
+
+                    $optionLines = [];
+
+                    foreach ($question['options'] as $option) {
+                        $optionLines[] = '    - '.$option['label'];
+                    }
+
+                    $questionLines[] = '  Q'.($questionIndex + 1).': '.$text;
+                    $questionLines[] = implode(PHP_EOL, $optionLines);
+                }
+
+                return $line.PHP_EOL
+                    .'  session_id: '.$id.PHP_EOL
+                    .'  Pending questions:'.PHP_EOL
+                    .implode(PHP_EOL, $questionLines);
             },
             $sessions,
         );
