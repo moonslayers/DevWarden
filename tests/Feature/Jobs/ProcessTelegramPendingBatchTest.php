@@ -10,6 +10,7 @@ use App\Models\BotSetting;
 use App\Models\TelegramChatBatch;
 use App\Models\TelegramPendingMessage;
 use App\Models\User;
+use App\Services\Embedding\EmbeddingService;
 use App\Services\Telegram\TelegramClient;
 use App\Services\Telegram\TelegramMessageBuffer;
 use App\Services\Telegram\ThinkingIndicator;
@@ -33,6 +34,14 @@ beforeEach(function () {
     ]);
 
     $this->buffer = new TelegramMessageBuffer;
+
+    app()->instance(EmbeddingService::class, new class implements EmbeddingService
+    {
+        public function embed(string|array $texts): array
+        {
+            return [[1.0, 0.0, 0.0, 0.0]];
+        }
+    });
 
     app()->instance(TelegramClient::class, mock(TelegramClient::class));
     app()->instance(ThinkingIndicator::class, mock(ThinkingIndicator::class));

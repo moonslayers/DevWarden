@@ -7,6 +7,7 @@ use App\Models\AiProvider;
 use App\Models\BotSetting;
 use App\Models\TelegramPendingMessage;
 use App\Models\User;
+use App\Services\Embedding\EmbeddingService;
 use App\Services\Telegram\TelegramClient;
 use App\Services\Telegram\ThinkingIndicator;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -25,6 +26,14 @@ beforeEach(function () {
         'api_key' => 'sk-openai',
         'model_text' => 'gpt-4o-mini',
     ]);
+
+    app()->instance(EmbeddingService::class, new class implements EmbeddingService
+    {
+        public function embed(string|array $texts): array
+        {
+            return [[1.0, 0.0, 0.0, 0.0]];
+        }
+    });
 
     app()->instance(TelegramClient::class, mock(TelegramClient::class));
 });

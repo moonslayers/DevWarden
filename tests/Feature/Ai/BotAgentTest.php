@@ -15,6 +15,8 @@ use App\Models\SubAgentUsageLog;
 use App\Models\TelegramChatConversation;
 use App\Models\User;
 use App\Services\AiConfigSyncer;
+use App\Services\Embedding\EmbeddingService;
+use App\Services\Embedding\LocalEmbeddingService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
@@ -34,6 +36,14 @@ beforeEach(function () {
         'api_key' => 'sk-openai',
         'model_text' => 'gpt-4o-mini',
     ]);
+
+    app()->instance(EmbeddingService::class, new class implements EmbeddingService
+    {
+        public function embed(string|array $texts): array
+        {
+            return [[1.0, 0.0, 0.0, 0.0]];
+        }
+    });
 
     $this->imagePath = tempnam(sys_get_temp_dir(), 'bot_agent_vision_').'.png';
 
@@ -390,4 +400,17 @@ test('respond attaches the raw image when the vision description fails', functio
         return $prompt->attachments->count() === 1
             && ! str_contains($prompt->prompt, '<image_description>');
     });
+});
+
+/**
+ * Regression test: guards the beforeEach EmbeddingService stub.
+ *
+ * Without the stub, the container resolves the real LocalEmbeddingService,
+ * which loads the 138 MB ONNX model via onnxruntime FFI on every respond()
+ * (~260-280 MB native memory per test) and spikes the suite to ~5 GB of RAM.
+ * If someone removes the stub from beforeEach, this test fails.
+ */
+test('resolves a stubbed EmbeddingService instead of the real LocalEmbeddingService', function () {
+    expect(app(EmbeddingService::class))
+        ->not->toBeInstanceOf(LocalEmbeddingService::class);
 });

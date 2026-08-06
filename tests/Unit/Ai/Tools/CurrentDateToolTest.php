@@ -7,11 +7,11 @@ use Tests\TestCase;
 uses(TestCase::class);
 
 test('handle returns a string describing the current date and time', function () {
-    $before = now()->toDateString();
+    $before = now()->format('l, F j, Y');
 
     $result = (new CurrentDateTool)->handle(new Request);
 
-    $after = now()->toDateString();
+    $after = now()->format('l, F j, Y');
 
     expect($result)->toBeString()
         ->toStartWith('Today is ')
