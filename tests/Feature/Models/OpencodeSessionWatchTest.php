@@ -17,6 +17,7 @@ test('factory produces a valid row', function () {
 
     expect($watch->exists)->toBeTrue();
     expect($watch->session_id)->toStartWith('ses_');
+    expect($watch->is_subagent)->toBeFalse();
     expect($watch->project_path)->not->toBeNull();
     expect($watch->title)->not->toBeNull();
     expect($watch->chat_id)->toBeInt();
@@ -30,6 +31,7 @@ test('fillable attributes are mass assignable and cast correctly', function () {
 
     $watch = OpencodeSessionWatch::create([
         'session_id' => 'ses_test_mass_assign_001',
+        'is_subagent' => true,
         'project_path' => '/tmp/project',
         'title' => 'Refactor session',
         'chat_id' => 123456789,
@@ -40,6 +42,8 @@ test('fillable attributes are mass assignable and cast correctly', function () {
     ]);
 
     expect($watch->session_id)->toBe('ses_test_mass_assign_001');
+    expect($watch->is_subagent)->toBeTrue();
+    expect($watch->is_subagent)->toBeBool();
     expect($watch->chat_id)->toBeInt();
     expect($watch->chat_id)->toBe(123456789);
     expect($watch->last_notified_event)->toBe('finished');

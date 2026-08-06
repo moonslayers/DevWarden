@@ -19,6 +19,7 @@ class OpencodeSessionWatchFactory extends Factory
     {
         return [
             'session_id' => 'ses_'.fake()->unique()->regexify('[A-Za-z0-9]{24}'),
+            'is_subagent' => false,
             'project_path' => '/home/junior/Projects/DevWarden',
             'title' => fake()->sentence(4),
             'chat_id' => fake()->numberBetween(100000000, 999999999),

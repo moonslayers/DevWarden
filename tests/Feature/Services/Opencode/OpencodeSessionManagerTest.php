@@ -4,7 +4,6 @@ use App\Models\OpencodeSetting;
 use App\Services\Opencode\Exceptions\OpencodeException;
 use App\Services\Opencode\Exceptions\OpencodeProjectNotAllowed;
 use App\Services\Opencode\OpencodeSessionManager;
-use Carbon\Carbon;
 use Laravel\Mcp\Client;
 use Laravel\Mcp\Client\Schema\ToolResult;
 use Laravel\Mcp\Client\Transport\StdioTransport;
@@ -241,48 +240,6 @@ test('checkSession forwards the detailed flag', function () {
     ]);
 });
 
-test('sessionProgress is not complete while the tasks line has an in progress clause', function () {
-    $fake = new FakeMcpClient;
-    $fake->responses['opencode_check'] = "Status: **idle**\n\nTasks: 8/9 completed, 1 in progress\n\nDone!";
-
-    $result = fakeManager($fake)->sessionProgress('ses_work', '/home/junior/Projects/DevWarden');
-
-    expect($result)->toMatchArray([
-        'all_tasks_completed' => false,
-        'tasks_line' => 'Tasks: 8/9 completed, 1 in progress',
-    ]);
-
-    expect($fake->calls[0]['arguments'])->toMatchArray([
-        'sessionId' => 'ses_work',
-        'directory' => '/home/junior/Projects/DevWarden',
-        'detailed' => false,
-    ]);
-});
-
-test('sessionProgress is complete when the tasks line has no in progress clause', function () {
-    $fake = new FakeMcpClient;
-    $fake->responses['opencode_check'] = "Status: **idle**\n\nTasks: 5/5 completed\n\nDone!";
-
-    $result = fakeManager($fake)->sessionProgress('ses_done', '/home/junior/Projects/DevWarden');
-
-    expect($result)->toMatchArray([
-        'all_tasks_completed' => true,
-        'tasks_line' => 'Tasks: 5/5 completed',
-    ]);
-});
-
-test('sessionProgress is conservative and not complete when there is no tasks line', function () {
-    $fake = new FakeMcpClient;
-    $fake->responses['opencode_check'] = 'Status: **running**';
-
-    $result = fakeManager($fake)->sessionProgress('ses_weird', '/home/junior/Projects/DevWarden');
-
-    expect($result)->toMatchArray([
-        'all_tasks_completed' => false,
-        'tasks_line' => null,
-    ])->and($result['raw'])->toBe('Status: **running**');
-});
-
 test('conversation returns the trimmed transcript with a limit', function () {
     $fake = new FakeMcpClient;
     $fake->responses['opencode_conversation'] = "--- Message 1 [user] ---\nhi\n--- Message 2 [assistant] ---\nhello\n";
@@ -296,84 +253,6 @@ test('conversation returns the trimmed transcript with a limit', function () {
         'directory' => '/home/junior/Projects/DevWarden',
         'limit' => 5,
     ]);
-});
-
-test('listSessions parses the overview header and session lines', function () {
-    $fake = new FakeMcpClient;
-    $fake->responses['opencode_sessions_overview'] = <<<'TXT'
-## Sessions (3)
-- [busy] Building the thing [ses_abc123]
-- [idle] Another thing [ses_def456] (child of ses_abc123)
-- [busy] Third [ses_ghi789]
-TXT;
-
-    $result = fakeManager($fake)->listSessions();
-
-    expect($result)->toBe([
-        ['id' => 'ses_abc123', 'title' => 'Building the thing', 'status' => 'busy'],
-        ['id' => 'ses_def456', 'title' => 'Another thing', 'status' => 'idle'],
-        ['id' => 'ses_ghi789', 'title' => 'Third', 'status' => 'busy'],
-    ]);
-
-    expect($fake->calls[0])->toMatchArray(['name' => 'opencode_sessions_overview', 'arguments' => []]);
-});
-
-test('listSessions returns an empty array when there are no sessions', function () {
-    $fake = new FakeMcpClient;
-    $fake->responses['opencode_sessions_overview'] = "## Sessions (0)\nNo sessions found.";
-
-    expect(fakeManager($fake)->listSessions())->toBe([]);
-});
-
-test('sessionInfo parses ID, Title, Slug, Directory and Updated and passes the session id', function () {
-    $fake = new FakeMcpClient;
-    $fake->responses['opencode_session_get'] = <<<'TXT'
-ID: ses_abc123
-Title: Build the feature
-Slug: build-the-feature
-Created: 2026-08-05T10:00:00Z
-Updated: 2026-08-05T10:30:00Z
-Version: 4
-Directory: /home/junior/Projects/DevWarden
-TXT;
-
-    $result = fakeManager($fake)->sessionInfo('ses_abc123');
-
-    expect($result)->toMatchArray([
-        'id' => 'ses_abc123',
-        'title' => 'Build the feature',
-        'directory' => '/home/junior/Projects/DevWarden',
-    ])
-        ->and($result['updated_at'])->not->toBeNull()
-        ->and($result['updated_at']->equalTo(Carbon::parse('2026-08-05T10:30:00Z')))->toBeTrue();
-
-    expect($fake->calls[0])->toMatchArray(['name' => 'opencode_session_get', 'arguments' => ['id' => 'ses_abc123']]);
-});
-
-test('sessionInfo leaves updated_at null when the Updated line is missing or unparseable', function () {
-    $fake = new FakeMcpClient;
-    $fake->responses['opencode_session_get'] = <<<'TXT'
-ID: ses_abc123
-Title: Build the feature
-Updated: not-a-date
-Directory: /home/junior/Projects/DevWarden
-TXT;
-
-    $result = fakeManager($fake)->sessionInfo('ses_abc123');
-
-    expect($result['updated_at'])->toBeNull();
-});
-
-test('sessionInfo throws OpencodeProjectNotAllowed when the directory is outside the root', function () {
-    $fake = new FakeMcpClient;
-    $fake->responses['opencode_session_get'] = <<<'TXT'
-ID: ses_abc123
-Title: Rogue session
-Directory: /etc/something
-TXT;
-
-    expect(fn () => fakeManager($fake)->sessionInfo('ses_abc123'))
-        ->toThrow(OpencodeProjectNotAllowed::class, '/etc/something');
 });
 
 test('pendingPermissions returns an empty array when nothing is pending', function () {

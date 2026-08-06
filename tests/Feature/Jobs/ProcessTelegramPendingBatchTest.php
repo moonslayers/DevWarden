@@ -11,6 +11,7 @@ use App\Models\TelegramChatBatch;
 use App\Models\TelegramPendingMessage;
 use App\Models\User;
 use App\Services\Embedding\EmbeddingService;
+use App\Services\Opencode\OpencodeSessionStore;
 use App\Services\Telegram\TelegramClient;
 use App\Services\Telegram\TelegramMessageBuffer;
 use App\Services\Telegram\ThinkingIndicator;
@@ -40,6 +41,14 @@ beforeEach(function () {
         public function embed(string|array $texts): array
         {
             return [[1.0, 0.0, 0.0, 0.0]];
+        }
+    });
+
+    app()->instance(OpencodeSessionStore::class, new class extends OpencodeSessionStore
+    {
+        public function activeSessions(?int $sinceEpochMs = null): array
+        {
+            return [];
         }
     });
 

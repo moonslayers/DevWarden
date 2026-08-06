@@ -6,8 +6,6 @@ use App\Models\OpencodeSetting;
 use App\Services\Opencode\Exceptions\OpencodeException;
 use App\Services\Opencode\Exceptions\OpencodeProjectNotAllowed;
 use Closure;
-use Illuminate\Support\Carbon;
-use Illuminate\Support\Facades\Log;
 use Laravel\Mcp\Client;
 use Laravel\Mcp\Client\Schema\ToolResult;
 use Laravel\Mcp\Exceptions\ClientException;
@@ -165,48 +163,6 @@ class OpencodeSessionManager
     }
 
     /**
-     * Check whether every task of a session is completed.
-     *
-     * The reliable activity signal for TUI sessions is the "Tasks:" line in
-     * opencode_check's output: "8/9 completed, 1 in progress" means the session
-     * is still working, while "5/5 completed" without an "in progress" clause
-     * means it is done. The "Done!" footer and the Status field are NOT reliable
-     * for TUI sessions (they appear even while tasks are in progress), so they
-     * are ignored here. When no Tasks line is present the result is conservatively
-     * treated as not complete, so nothing is notified.
-     *
-     * @return array{all_tasks_completed: bool, tasks_line: ?string, raw: string}
-     */
-    public function sessionProgress(string $sessionId, string $directory): array
-    {
-        $this->assertAllowedProject($directory);
-
-        $text = $this->toolText($this->callTool('opencode_check', [
-            'sessionId' => $sessionId,
-            'directory' => $directory,
-            'detailed' => false,
-        ]));
-
-        $tasksLine = null;
-        $allTasksCompleted = false;
-
-        if (preg_match('/Tasks:\s*\d+\s*\/\s*\d+\s*completed[^\r\n]*/i', $text, $matches) === 1) {
-            $tasksLine = trim($matches[0]);
-            $allTasksCompleted = ! str_contains(strtolower($tasksLine), 'in progress');
-        } else {
-            Log::debug('OpencodeSessionManager: no Tasks line in check output.', [
-                'session_id' => $sessionId,
-            ]);
-        }
-
-        return [
-            'all_tasks_completed' => $allTasksCompleted,
-            'tasks_line' => $tasksLine,
-            'raw' => $text,
-        ];
-    }
-
-    /**
      * Fetch the plain-text conversation transcript of a session.
      */
     public function conversation(string $sessionId, string $directory, int $limit = 20): string
@@ -220,78 +176,6 @@ class OpencodeSessionManager
         ]));
 
         return trim($text);
-    }
-
-    /**
-     * Discover all opencode sessions (including ones started outside the bot).
-     *
-     * Wraps opencode_sessions_overview, which has no required params and lists
-     * every session regardless of directory. Parses the text response into
-     * [{id, title, status}] and returns an empty array when none exist.
-     *
-     * @return array<int, array{id: string, title: string, status: string}>
-     */
-    public function listSessions(): array
-    {
-        $text = $this->toolText($this->callTool('opencode_sessions_overview', []));
-
-        $sessions = [];
-
-        foreach (explode("\n", $text) as $line) {
-            $parsed = $this->parseSessionLine(trim($line));
-
-            if ($parsed !== null) {
-                $sessions[] = $parsed;
-            }
-        }
-
-        return $sessions;
-    }
-
-    /**
-     * Resolve metadata for a single session by id.
-     *
-     * The whitelist can only be validated after the response is parsed, because
-     * the Directory is unknown before calling opencode_session_get. If the
-     * returned directory is outside the configured root projects path the call
-     * throws OpencodeProjectNotAllowed.
-     *
-     * @return array{id: string, title: ?string, directory: ?string, updated_at: ?Carbon}
-     */
-    public function sessionInfo(string $sessionId): array
-    {
-        $text = $this->toolText($this->callTool('opencode_session_get', ['id' => $sessionId]));
-
-        $fields = [];
-
-        foreach (explode("\n", $text) as $line) {
-            if (preg_match('/^(ID|Title|Slug|Directory|Updated):\s*(.*)$/', trim($line), $matches) === 1) {
-                $fields[strtolower($matches[1])] = trim($matches[2]);
-            }
-        }
-
-        $directory = $fields['directory'] ?? null;
-
-        if ($directory !== null && $directory !== '' && ! $this->isAllowedProject($directory)) {
-            throw new OpencodeProjectNotAllowed($directory, (string) OpencodeSetting::singleton()->root_projects_path);
-        }
-
-        $updatedAt = null;
-
-        if (isset($fields['updated']) && $fields['updated'] !== '') {
-            try {
-                $updatedAt = Carbon::parse($fields['updated']);
-            } catch (\Throwable) {
-                $updatedAt = null;
-            }
-        }
-
-        return [
-            'id' => $fields['id'] ?? $sessionId,
-            'title' => $fields['title'] ?? null,
-            'directory' => $directory,
-            'updated_at' => $updatedAt,
-        ];
     }
 
     /**
@@ -456,25 +340,6 @@ class OpencodeSessionManager
         }
 
         return $matches[0];
-    }
-
-    /**
-     * Parse a single "- [status] title [ses_xxx]" line, tolerating an optional
-     * " (child of ses_yyy)" suffix.
-     *
-     * @return array{id: string, title: string, status: string}|null
-     */
-    protected function parseSessionLine(string $line): ?array
-    {
-        if (preg_match('/^[-*]\s*\[([^\]]+)\]\s+(.+?)\s+\[(ses_[A-Za-z0-9]+)\](?:\s+\(child of\s+(ses_[A-Za-z0-9]+)\))?\s*$/', $line, $matches) !== 1) {
-            return null;
-        }
-
-        return [
-            'id' => $matches[3],
-            'title' => trim($matches[2]),
-            'status' => trim($matches[1]),
-        ];
     }
 
     /**

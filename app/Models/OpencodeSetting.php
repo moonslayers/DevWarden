@@ -12,10 +12,12 @@ use Illuminate\Support\Carbon;
  * @property int $id
  * @property string $root_projects_path
  * @property string $mcp_command
+ * @property string|null $data_db_path
+ * @property Carbon|null $session_watch_since
  * @property Carbon|null $created_at
  * @property Carbon|null $updated_at
  */
-#[Fillable(['root_projects_path', 'mcp_command'])]
+#[Fillable(['root_projects_path', 'mcp_command', 'data_db_path', 'session_watch_since'])]
 class OpencodeSetting extends Model
 {
     /** @use HasFactory<OpencodeSettingFactory> */
@@ -27,5 +29,17 @@ class OpencodeSetting extends Model
     public static function singleton(): static
     {
         return static::query()->firstOrCreate(['id' => 1])->refresh();
+    }
+
+    /**
+     * Get the attributes that should be cast.
+     *
+     * @return array<string, string>
+     */
+    protected function casts(): array
+    {
+        return [
+            'session_watch_since' => 'datetime',
+        ];
     }
 }

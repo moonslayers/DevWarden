@@ -8,6 +8,7 @@ Before planning or editing, find the row whose globs match the file's path and r
 | app/Ai/Agents/** | .ai/rules/agents.md |
 | app/**,app/Jobs/**,app/Services/**,app/Ai/** | .ai/rules/ai.md |
 | app/Ai/** | .ai/rules/app-ai.md |
+| app/Services/Opencode/**,app/Console/Commands/**,database/migrations/** | .ai/rules/commands-migrations.md |
 | app/Console/Commands/** | .ai/rules/commands.md |
 | resources/js/composables/** | .ai/rules/composables.md |
 | app/Services/Telegram/**,app/Console/Commands/** | .ai/rules/console-commands.md |

@@ -8,6 +8,7 @@ use App\Models\User;
 use App\Services\Embedding\EmbeddingException;
 use App\Services\Embedding\EmbeddingService;
 use App\Services\Memory\MemoryRepository;
+use App\Services\Opencode\OpencodeSessionStore;
 use Illuminate\Support\Str;
 
 beforeEach(function () {
@@ -19,6 +20,14 @@ beforeEach(function () {
         'api_key' => 'sk-openai',
         'model_text' => 'gpt-4o-mini',
     ]);
+
+    app()->instance(OpencodeSessionStore::class, new class extends OpencodeSessionStore
+    {
+        public function activeSessions(?int $sinceEpochMs = null): array
+        {
+            return [];
+        }
+    });
 });
 
 test('respond injects relevant long-term memories into the prompt', function () {

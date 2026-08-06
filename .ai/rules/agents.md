@@ -22,3 +22,6 @@ The opencode.ai "Console Go" gateway (https://opencode.ai/zen/go/v1, model deeps
 
 ## VisionWorkflowContext must be bound before buildPromptWithImage so describe logs the chat_id
 BotAgent::respond() must call VisionWorkflowContext::set($imagePath, $chatId) BEFORE buildPromptWithImage() runs: that method invokes VisionAgent::describe(), which records SubAgentUsageLog with chat_id = VisionWorkflowContext::chatId(). Binding after describe left every kind=describe log with chat_id=null (asymmetry vs kind=ask). Keep the set inside the same try whose finally clears both VisionWorkflowContext and OpencodeWorkflowContext.
+
+## BotAgent active-sessions block: cheap working signal via OpencodeSessionWatch
+buildPromptWithActiveSessions() prepends an <active_opencode_sessions> block; each builder prepends, so the final prompt is <active_opencode_sessions> → <skills> → <memories> → user text (active_sessions → skills → memories). Listing open TUI sessions (parent_id null), excluding ids in opencode_session_dismissals, top ~10 by time_updated DESC. The "working" flag reads OpencodeSessionWatch.last_seen_status === 'working' (one indexed lookup in the app DB) instead of store->sessionState(), which opens a fresh read-only PDO per session — too expensive for every bot message. The block uses the same UNTRUSTED REFERENCE DATA anti-injection framing as <memories>.

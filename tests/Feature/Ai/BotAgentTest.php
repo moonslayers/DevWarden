@@ -3,13 +3,19 @@
 use App\Ai\Agents\BotAgent;
 use App\Ai\Agents\VisionAgent;
 use App\Ai\Context\VisionWorkflowContext;
+use App\Ai\Tools\Opencode\AbortSessionTool;
+use App\Ai\Tools\Opencode\MarkSessionDoneTool;
 use App\Ai\Tools\Opencode\OpencodeWorkflowContext;
+use App\Ai\Tools\Opencode\ReactivateSessionTool;
+use App\Ai\Tools\Opencode\SearchSessionsTool;
 use App\Enums\AiProviderType;
 use App\Enums\BotSubAgentType;
 use App\Models\AiProvider;
 use App\Models\BotSetting;
 use App\Models\BotSkill;
 use App\Models\BotSubAgent;
+use App\Models\OpencodeSessionDismissal;
+use App\Models\OpencodeSessionWatch;
 use App\Models\OpencodeWorkflow;
 use App\Models\SubAgentUsageLog;
 use App\Models\TelegramChatConversation;
@@ -17,6 +23,7 @@ use App\Models\User;
 use App\Services\AiConfigSyncer;
 use App\Services\Embedding\EmbeddingService;
 use App\Services\Embedding\LocalEmbeddingService;
+use App\Services\Opencode\OpencodeSessionStore;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
@@ -24,6 +31,8 @@ use Laravel\Ai\Models\Conversation;
 use Laravel\Ai\Models\ConversationMessage;
 use Laravel\Ai\Prompts\AgentPrompt;
 use RuntimeException;
+
+use function Pest\Laravel\mock;
 
 uses(RefreshDatabase::class);
 
@@ -59,6 +68,18 @@ afterEach(function () {
     if (is_string($this->imagePath) && is_file($this->imagePath)) {
         @unlink($this->imagePath);
     }
+});
+
+test('tools include the opencode session lifecycle tools', function () {
+    $classes = array_map(
+        fn ($tool): string => $tool::class,
+        iterator_to_array(app(BotAgent::class)->tools()),
+    );
+
+    expect($classes)->toContain(MarkSessionDoneTool::class)
+        ->and($classes)->toContain(ReactivateSessionTool::class)
+        ->and($classes)->toContain(AbortSessionTool::class)
+        ->and($classes)->toContain(SearchSessionsTool::class);
 });
 
 test('respond populates the opencode workflow chat context during the prompt and clears it afterwards', function () {
@@ -215,6 +236,98 @@ test('respond does not inject an inactive skill even when the text matches its k
     app(BotAgent::class)->respond(123456789, 'usa opencode en s2c para X', $this->owner);
 
     BotAgent::assertPrompted(fn ($prompt): bool => ! str_contains($prompt->prompt, '<skill'));
+});
+
+test('respond injects the active opencode sessions block for open TUI sessions', function () {
+    $store = mock(OpencodeSessionStore::class);
+    $store->shouldReceive('activeSessions')->andReturn([
+        ['id' => 'ses_a', 'title' => 'Refactor auth', 'directory' => '/home/junior/Projects/DevWarden', 'time_updated' => now()->getTimestampMs(), 'parent_id' => null],
+        ['id' => 'ses_b', 'title' => 'Fix dashboard', 'directory' => '/home/junior/Projects/s2c', 'time_updated' => now()->subMinutes(5)->getTimestampMs(), 'parent_id' => null],
+    ]);
+    app()->instance(OpencodeSessionStore::class, $store);
+
+    BotAgent::fake(['Reply from the bot.']);
+
+    app(BotAgent::class)->respond(123456789, 'Hello', $this->owner);
+
+    BotAgent::assertPrompted(function (AgentPrompt $prompt): bool {
+        return str_contains($prompt->prompt, '<active_opencode_sessions>')
+            && str_contains($prompt->prompt, 'Refactor auth')
+            && str_contains($prompt->prompt, 'Fix dashboard')
+            && str_contains($prompt->prompt, 'Hello');
+    });
+});
+
+test('respond excludes dismissed opencode sessions from the active sessions block', function () {
+    $store = mock(OpencodeSessionStore::class);
+    $store->shouldReceive('activeSessions')->andReturn([
+        ['id' => 'ses_active', 'title' => 'Active task', 'directory' => '/home/junior/Projects/DevWarden', 'time_updated' => now()->getTimestampMs(), 'parent_id' => null],
+        ['id' => 'ses_done', 'title' => 'Done task', 'directory' => '/home/junior/Projects/s2c', 'time_updated' => now()->getTimestampMs(), 'parent_id' => null],
+    ]);
+    app()->instance(OpencodeSessionStore::class, $store);
+
+    OpencodeSessionDismissal::factory()->create(['session_id' => 'ses_done']);
+
+    BotAgent::fake(['Reply from the bot.']);
+
+    app(BotAgent::class)->respond(123456789, 'Hello', $this->owner);
+
+    BotAgent::assertPrompted(function (AgentPrompt $prompt): bool {
+        return str_contains($prompt->prompt, '<active_opencode_sessions>')
+            && str_contains($prompt->prompt, 'Active task')
+            && ! str_contains($prompt->prompt, 'Done task');
+    });
+});
+
+test('respond does not inject a block when only sub-agent sessions are active', function () {
+    $store = mock(OpencodeSessionStore::class);
+    $store->shouldReceive('activeSessions')->andReturn([
+        ['id' => 'ses_sub', 'title' => 'Sub task', 'directory' => '/home/junior/Projects/DevWarden', 'time_updated' => now()->getTimestampMs(), 'parent_id' => 'ses_tui'],
+    ]);
+    app()->instance(OpencodeSessionStore::class, $store);
+
+    BotAgent::fake(['Reply from the bot.']);
+
+    app(BotAgent::class)->respond(123456789, 'Hello', $this->owner);
+
+    BotAgent::assertPrompted(fn (AgentPrompt $prompt): bool => ! str_contains($prompt->prompt, '<active_opencode_sessions>'));
+});
+
+test('respond does not inject a block when no opencode session is active', function () {
+    $store = mock(OpencodeSessionStore::class);
+    $store->shouldReceive('activeSessions')->andReturn([]);
+    app()->instance(OpencodeSessionStore::class, $store);
+
+    BotAgent::fake(['Reply from the bot.']);
+
+    app(BotAgent::class)->respond(123456789, 'Hello', $this->owner);
+
+    BotAgent::assertPrompted(fn (AgentPrompt $prompt): bool => ! str_contains($prompt->prompt, '<active_opencode_sessions>'));
+});
+
+test('respond marks a session as working when its watch reports it as working', function () {
+    $store = mock(OpencodeSessionStore::class);
+    $store->shouldReceive('activeSessions')->andReturn([
+        ['id' => 'ses_work', 'title' => 'Building feature', 'directory' => '/home/junior/Projects/DevWarden', 'time_updated' => now()->getTimestampMs(), 'parent_id' => null],
+        ['id' => 'ses_idle', 'title' => 'Idle task', 'directory' => '/home/junior/Projects/s2c', 'time_updated' => now()->getTimestampMs(), 'parent_id' => null],
+    ]);
+    app()->instance(OpencodeSessionStore::class, $store);
+
+    OpencodeSessionWatch::factory()->create([
+        'session_id' => 'ses_work',
+        'last_seen_status' => 'working',
+    ]);
+
+    BotAgent::fake(['Reply from the bot.']);
+
+    app(BotAgent::class)->respond(123456789, 'Hello', $this->owner);
+
+    BotAgent::assertPrompted(function (AgentPrompt $prompt): bool {
+        $workingLine = preg_match('/- "Building feature" — .*\(last activity .*, working\)/', $prompt->prompt) === 1;
+        $idleLine = preg_match('/- "Idle task" — .*\(last activity .*, idle\)/', $prompt->prompt) === 1;
+
+        return $workingLine && $idleLine;
+    });
 });
 
 test('respond propagates an exception when every provider in the chain fails', function () {

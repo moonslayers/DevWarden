@@ -20,6 +20,8 @@ class OpencodeSettingFactory extends Factory
         return [
             'root_projects_path' => '/home/junior/Projects',
             'mcp_command' => 'opencode-mcp',
+            'data_db_path' => '/tmp/devwarden-test/opencode.db',
+            'session_watch_since' => null,
         ];
     }
 }

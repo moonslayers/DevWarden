@@ -1,0 +1,58 @@
+<?php
+
+namespace App\Ai\Tools\Opencode;
+
+use App\Models\OpencodeSessionDismissal;
+use Illuminate\Contracts\JsonSchema\JsonSchema;
+use Laravel\Ai\Tools\Request;
+use Stringable;
+
+class MarkSessionDoneTool extends OpencodeSessionTool
+{
+    /**
+     * Get the description of the tool's purpose.
+     */
+    public function description(): Stringable|string
+    {
+        return 'Marks an opencode session as done so the bot stops treating it as active and stops reporting it. NOT destructive: the session keeps running in opencode. Use when the user says a session is finished or does not want to be reminded of it anymore. Pass the "session_id" (ses_...) or a "query" (session title or project directory) to identify the session. Idempotent: marking a session that is already done reports it was already done.';
+    }
+
+    /**
+     * Execute the tool.
+     */
+    public function handle(Request $request): Stringable|string
+    {
+        $sessionId = $this->resolveSessionId($request);
+
+        if ($sessionId === null) {
+            return 'Error: missing "session_id" argument. Pass the opencode session id or a "query" (title/directory) to identify the session.';
+        }
+
+        $already = OpencodeSessionDismissal::query()->whereKey($sessionId)->exists();
+
+        OpencodeSessionDismissal::query()->updateOrCreate(
+            ['session_id' => $sessionId],
+            ['dismissed_at' => now()],
+        );
+
+        if ($already) {
+            return "Session [{$sessionId}] was already marked as done.";
+        }
+
+        return "Session [{$sessionId}] marked as done. The bot will stop reporting it until it is reactivated.";
+    }
+
+    /**
+     * Get the tool's schema definition.
+     */
+    public function schema(JsonSchema $schema): array
+    {
+        return [
+            'session_id' => $schema->string()
+                ->required()
+                ->description('The opencode session id (ses_...).'),
+            'query' => $schema->string()
+                ->description('Optional session title or project directory to resolve the session when the session id is not known.'),
+        ];
+    }
+}

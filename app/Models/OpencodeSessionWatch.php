@@ -11,6 +11,7 @@ use Illuminate\Support\Carbon;
 /**
  * @property int $id
  * @property string $session_id
+ * @property bool $is_subagent
  * @property string|null $project_path
  * @property string|null $title
  * @property int|null $chat_id
@@ -22,7 +23,7 @@ use Illuminate\Support\Carbon;
  * @property Carbon|null $updated_at
  */
 #[Fillable([
-    'session_id', 'project_path', 'title', 'chat_id',
+    'session_id', 'is_subagent', 'project_path', 'title', 'chat_id',
     'last_seen_status', 'last_notified_event', 'checked_at', 'notified_at',
 ])]
 class OpencodeSessionWatch extends Model
@@ -38,6 +39,7 @@ class OpencodeSessionWatch extends Model
     protected function casts(): array
     {
         return [
+            'is_subagent' => 'boolean',
             'chat_id' => 'integer',
             'checked_at' => 'datetime',
             'notified_at' => 'datetime',

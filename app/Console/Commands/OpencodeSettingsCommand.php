@@ -7,8 +7,8 @@ use Illuminate\Console\Attributes\Description;
 use Illuminate\Console\Attributes\Signature;
 use Illuminate\Console\Command;
 
-#[Signature('opencode:settings {--show : Display the current opencode settings} {--root= : Set the absolute root projects path} {--mcp-command= : Set the opencode MCP command}')]
-#[Description('Show or update the opencode settings (root projects path and MCP command)')]
+#[Signature('opencode:settings {--show : Display the current opencode settings} {--root= : Set the absolute root projects path} {--mcp-command= : Set the opencode MCP command} {--db-path= : Set the absolute path to the opencode SQLite database file}')]
+#[Description('Show or update the opencode settings (root projects path, MCP command and database path)')]
 class OpencodeSettingsCommand extends Command
 {
     /**
@@ -20,8 +20,13 @@ class OpencodeSettingsCommand extends Command
 
         $root = $this->option('root');
         $mcpCommand = $this->option('mcp-command');
+        $dbPath = $this->option('db-path');
 
         if ($root !== null && ! $this->validateRootPath($root)) {
+            return self::FAILURE;
+        }
+
+        if ($dbPath !== null && ! $this->validateDbPath($dbPath)) {
             return self::FAILURE;
         }
 
@@ -41,6 +46,10 @@ class OpencodeSettingsCommand extends Command
             $settings->root_projects_path = $root;
         }
 
+        if ($dbPath !== null) {
+            $settings->data_db_path = $dbPath;
+        }
+
         $changed = $settings->isDirty();
 
         $settings->save();
@@ -51,6 +60,8 @@ class OpencodeSettingsCommand extends Command
 
         $this->components->twoColumnDetail('Root projects path', $settings->root_projects_path);
         $this->components->twoColumnDetail('MCP command', $settings->mcp_command);
+        $this->components->twoColumnDetail('Data DB path', $settings->data_db_path ?? 'Not set');
+        $this->components->twoColumnDetail('Session watch since', $settings->session_watch_since?->toDateTimeString() ?? 'Not set');
 
         return self::SUCCESS;
     }
@@ -74,6 +85,26 @@ class OpencodeSettingsCommand extends Command
 
         if (! is_dir($path)) {
             $this->components->error(sprintf('The root projects path "%s" does not exist on disk.', $path));
+
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * Validate that the database path is absolute and points to an existing file.
+     */
+    private function validateDbPath(string $path): bool
+    {
+        if (! str_starts_with($path, DIRECTORY_SEPARATOR)) {
+            $this->components->error(sprintf('The database path "%s" is not absolute.', $path));
+
+            return false;
+        }
+
+        if (! is_file($path)) {
+            $this->components->error(sprintf('The database path "%s" does not point to an existing file on disk.', $path));
 
             return false;
         }
