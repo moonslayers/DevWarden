@@ -205,6 +205,37 @@ test('registers a newly discovered session without notifying', function () {
         ->and($messages)->toBeEmpty();
 });
 
+test('notifies a live question turn on the first tick a session is discovered', function () {
+    $chatId = sessionWatcherOwnerChat();
+
+    $messages = [];
+    $service = sessionWatcherService(
+        sessions: [['id' => 'ses_first_turn', 'title' => 'Fresh question', 'directory' => '/home/junior/Projects/DevWarden', 'time_updated' => sessionWatcherFresh()]],
+        states: ['ses_first_turn' => sessionWatcherState(['has_running_part' => true, 'last_turn_tool' => 'question'])],
+        conversations: ['ses_first_turn' => sessionWatcherTranscript('¿Confirmas la ruta del proyecto?')],
+        messages: $messages,
+    );
+
+    $service->check();
+
+    expect($messages)->toHaveCount(1)
+        ->and($messages[0]['chat_id'])->toBe($chatId)
+        ->and($messages[0]['text'])->toContain('La sesión de opencode "Fresh question" tiene preguntas.')
+        ->and($messages[0]['text'])->toContain('¿Confirmas la ruta del proyecto?');
+
+    $watch = OpencodeSessionWatch::where('session_id', 'ses_first_turn')->first();
+
+    expect($watch)->not->toBeNull()
+        ->and($watch->last_seen_status)->toBe('working')
+        ->and($watch->last_notified_event)->toBe('question')
+        ->and($watch->notified_at)->not->toBeNull();
+
+    // The same pending turn is never re-notified on a later tick.
+    $service->check();
+
+    expect($messages)->toHaveCount(1);
+});
+
 test('stays working and does not notify while a part is running', function () {
     $chatId = sessionWatcherOwnerChat();
     OpencodeSessionWatch::factory()->create([
@@ -264,7 +295,47 @@ test('notifies finished when a session transitions from working to idle', functi
         ->and($watch->notified_at)->not->toBeNull();
 });
 
-test('notifies question when the last assistant message ends with a question', function () {
+test('notifies finished with the previous real assistant text when the last assistant block is (no content)', function () {
+    $chatId = sessionWatcherOwnerChat();
+    OpencodeSessionWatch::factory()->create([
+        'session_id' => 'ses_no_content',
+        'title' => 'Deploy task',
+        'chat_id' => $chatId,
+        'last_seen_status' => 'working',
+    ]);
+
+    $messages = [];
+    $service = sessionWatcherService(
+        sessions: [['id' => 'ses_no_content', 'title' => 'Deploy task', 'directory' => '/home/junior/Projects/DevWarden', 'time_updated' => sessionWatcherFresh()]],
+        conversations: [
+            'ses_no_content' => "--- Message 1 [user] ---\n"
+                ."Go.\n\n"
+                ."--- Message 2 [assistant] ---\n"
+                ."El deploy se completó.\n\n"
+                ."--- Message 3 [assistant] ---\n"
+                .'(no content)',
+        ],
+        messages: $messages,
+    );
+
+    $service->check();
+    $service->check();
+
+    expect($messages)->toHaveCount(1)
+        ->and($messages[0]['chat_id'])->toBe($chatId)
+        ->and($messages[0]['text'])->toContain('La sesión de opencode "Deploy task" terminó.')
+        ->and($messages[0]['text'])->toContain('Proyecto: /home/junior/Projects/DevWarden')
+        ->and($messages[0]['text'])->toContain('El deploy se completó.')
+        ->and($messages[0]['text'])->not->toContain('(no content)');
+
+    $watch = OpencodeSessionWatch::where('session_id', 'ses_no_content')->first();
+
+    expect($watch->last_seen_status)->toBe('stopped')
+        ->and($watch->last_notified_event)->toBe('finished')
+        ->and($watch->notified_at)->not->toBeNull();
+});
+
+test('sends the finished message when the session ends with a rhetorical question', function () {
     $chatId = sessionWatcherOwnerChat();
     OpencodeSessionWatch::factory()->create([
         'session_id' => 'ses_q',
@@ -283,10 +354,51 @@ test('notifies question when the last assistant message ends with a question', f
     $service->check();
 
     expect($messages)->toHaveCount(1)
-        ->and($messages[0]['text'])->toContain('La sesión de opencode "Ask me" tiene preguntas.')
-        ->and($messages[0]['text'])->toContain('Responde para continuar.');
+        ->and($messages[0]['chat_id'])->toBe($chatId)
+        ->and($messages[0]['text'])->toContain('La sesión de opencode "Ask me" terminó.')
+        ->and($messages[0]['text'])->toContain('Proyecto: /home/junior/Projects/DevWarden')
+        ->and($messages[0]['text'])->toContain('¿Confirmas la ruta del proyecto?')
+        ->and($messages[0]['text'])->not->toContain('tiene preguntas.');
 
-    expect(OpencodeSessionWatch::where('session_id', 'ses_q')->first()->last_notified_event)->toBe('question');
+    $watch = OpencodeSessionWatch::where('session_id', 'ses_q')->first();
+
+    expect($watch->last_seen_status)->toBe('stopped')
+        ->and($watch->last_notified_event)->toBe('finished')
+        ->and($watch->notified_at)->not->toBeNull();
+});
+
+test('sends the finished message when a session ends on a rhetorical trailing question with no live question turn or pending permission', function () {
+    $chatId = sessionWatcherOwnerChat();
+    OpencodeSessionWatch::factory()->create([
+        'session_id' => 'ses_retro',
+        'title' => 'Retro end',
+        'chat_id' => $chatId,
+        'last_seen_status' => 'working',
+    ]);
+
+    $messages = [];
+    $service = sessionWatcherService(
+        sessions: [['id' => 'ses_retro', 'title' => 'Retro end', 'directory' => '/home/junior/Projects/DevWarden', 'time_updated' => sessionWatcherFresh()]],
+        conversations: ['ses_retro' => sessionWatcherTranscript('¿Procedemos con algo concreto, o era solo la prueba?')],
+        messages: $messages,
+    );
+
+    $service->check();
+
+    expect($messages)->toHaveCount(1)
+        ->and($messages[0]['text'])->toContain('La sesión de opencode "Retro end" terminó.')
+        ->and($messages[0]['text'])->toContain('¿Procedemos con algo concreto, o era solo la prueba?')
+        ->and($messages[0]['text'])->not->toContain('tiene preguntas.');
+
+    $watch = OpencodeSessionWatch::where('session_id', 'ses_retro')->first();
+
+    expect($watch->last_seen_status)->toBe('stopped')
+        ->and($watch->last_notified_event)->toBe('finished')
+        ->and($watch->notified_at)->not->toBeNull();
+
+    $service->check();
+
+    expect($messages)->toHaveCount(1);
 });
 
 test('notifies question when the session has a pending permission', function () {
@@ -806,7 +918,7 @@ test('retries a failed notification on the next tick and marks the session stopp
         ->and($watch->notified_at)->not->toBeNull();
 });
 
-test('does not re-notify a question on a later tick with the same stopped session', function () {
+test('does not re-notify a finished session on a later tick with the same stopped session', function () {
     $chatId = sessionWatcherOwnerChat();
     OpencodeSessionWatch::factory()->create([
         'session_id' => 'ses_q_once',
@@ -825,7 +937,8 @@ test('does not re-notify a question on a later tick with the same stopped sessio
     $service->check();
 
     expect($messages)->toHaveCount(1)
-        ->and(OpencodeSessionWatch::where('session_id', 'ses_q_once')->first()->last_notified_event)->toBe('question');
+        ->and($messages[0]['text'])->toContain('terminó.')
+        ->and(OpencodeSessionWatch::where('session_id', 'ses_q_once')->first()->last_notified_event)->toBe('finished');
 
     $service->check();
 
@@ -1046,6 +1159,12 @@ function opencodeWatcherFixture(array $sessions = []): string
             time_updated INTEGER NOT NULL,
             time_archived INTEGER
         );
+        CREATE TABLE part (
+            id INTEGER PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            time_created INTEGER NOT NULL,
+            data TEXT NOT NULL
+        );
         SQL);
 
     $statement = $pdo->prepare('INSERT INTO session (id, title, directory, parent_id, time_created, time_updated, time_archived) VALUES (?, ?, ?, ?, ?, ?, ?)');
@@ -1092,6 +1211,7 @@ test('initializes the session watch watermark on the first check and uses it as 
     $manager = mock(OpencodeSessionManager::class);
     $manager->shouldReceive('pendingPermissions')->andReturn([]);
     $notifier = mock(OpencodeNotifier::class);
+    $notifier->shouldReceive('notify')->andReturn(true);
 
     $service = new OpencodeSessionWatcher($store, $manager, $notifier, new OpencodeSessionParser);
 
@@ -1157,6 +1277,7 @@ test('resets the session watch watermark when the watcher has not ticked for ove
     $manager = mock(OpencodeSessionManager::class);
     $manager->shouldReceive('pendingPermissions')->andReturn([]);
     $notifier = mock(OpencodeNotifier::class);
+    $notifier->shouldReceive('notify')->andReturn(true);
 
     $service = new OpencodeSessionWatcher($store, $manager, $notifier, new OpencodeSessionParser);
 
@@ -1296,11 +1417,18 @@ test('boot summary does not list a session waiting for an answer; its question t
     $service->check();
 
     // The waiting session is excluded from the summary (only working sessions
-    // are listed); its question turn is notified separately with the question.
-    expect($messages)->toHaveCount(1)
-        ->and($messages[0]['text'])->toContain('tiene preguntas.')
-        ->and($messages[0]['text'])->toContain('¿Aplico los cambios?')
-        ->and($messages[0]['text'])->not->toContain('Sesiones activas desde el inicio del servidor:');
+    // are listed); the empty-boot message fires because no working session was
+    // found, and the question turn is notified separately with the question.
+    expect($messages)->toHaveCount(2);
+
+    $question = collect($messages)->first(fn (array $m): bool => str_contains($m['text'], 'tiene preguntas.'));
+    $emptyBoot = collect($messages)->first(fn (array $m): bool => str_contains($m['text'], 'No hay sesiones de opencode activas'));
+
+    expect($question)->not->toBeNull()
+        ->and($question['text'])->toContain('¿Aplico los cambios?')
+        ->and($question['text'])->not->toContain('Sesiones activas desde el inicio del servidor:');
+
+    expect($emptyBoot)->not->toBeNull();
 });
 
 test('sends the question turn alongside the boot summary on the first tick after a restart', function () {
@@ -1343,7 +1471,7 @@ test('sends the question turn alongside the boot summary on the first tick after
         ->and($question['text'])->toContain('¿Confirmas la ruta del proyecto?');
 });
 
-test('does not emit a boot summary when no session is active since the restart', function () {
+test('sends the empty-boot message when the only session since the restart is idle', function () {
     $chatId = sessionWatcherOwnerChat();
     OpencodeSetting::singleton()->update([
         'session_watch_since' => now()->subMinutes(15),
@@ -1369,7 +1497,13 @@ test('does not emit a boot summary when no session is active since the restart',
     $service->check();
     $service->check();
 
-    expect($messages)->toBeEmpty();
+    // No working session since the restart: the boot still reports with the
+    // empty-boot message, exactly once.
+    expect($messages)->toHaveCount(1)
+        ->and($messages[0]['chat_id'])->toBe($chatId)
+        ->and($messages[0]['text'])->toContain('Sistema DevWarden iniciado')
+        ->and($messages[0]['text'])->toContain('No hay sesiones de opencode activas')
+        ->and($messages[0]['text'])->not->toContain('Sesiones activas desde el inicio del servidor:');
 });
 
 test('boot summary skips workflow, dismissed and sub-agent sessions', function () {
@@ -1492,7 +1626,7 @@ test('boot summary includes a session updated shortly before the watermark reset
     expect(OpencodeSetting::singleton()->session_watch_boot_reported_at)->not->toBeNull();
 });
 
-test('does not seal the boot summary when discovery is empty and retries on the next tick', function () {
+test('sends an immediate empty-boot message on the first tick when discovery is empty', function () {
     $chatId = sessionWatcherOwnerChat();
     OpencodeSetting::singleton()->update([
         'session_watch_since' => now()->subMinutes(15),
@@ -1504,37 +1638,50 @@ test('does not seal the boot summary when discovery is empty and retries on the 
 
     $service->check();
 
-    expect($messages)->toBeEmpty()
-        ->and(OpencodeSetting::singleton()->session_watch_boot_reported_at)->toBeNull();
+    // An empty boot is reported right away: no waiting for a retry window and
+    // no silent seal, so the owner always gets a message on startup.
+    expect($messages)->toHaveCount(1)
+        ->and($messages[0]['chat_id'])->toBe($chatId)
+        ->and($messages[0]['text'])->toContain('Sistema DevWarden iniciado')
+        ->and($messages[0]['text'])->toContain('No hay sesiones de opencode activas');
 
-    // A session appears on the next tick while the retry window is still open:
-    // the boot summary is emitted instead of having been sealed on the first
-    // empty tick.
+    expect(OpencodeSetting::singleton()->session_watch_boot_reported_at)->not->toBeNull();
+});
+
+test('retries the empty-boot message on the next tick when the notification fails', function () {
+    sessionWatcherOwnerChat();
+    OpencodeSetting::singleton()->update([
+        'session_watch_since' => now()->subMinutes(15),
+        'session_watch_boot_reported_at' => null,
+    ]);
+
+    $messages = [];
+    $shouldFail = true;
     $service = sessionWatcherService(
-        sessions: [
-            ['id' => 'ses_late', 'title' => 'Late work', 'directory' => '/home/junior/Projects/DevWarden', 'time_updated' => sessionWatcherFresh()],
-        ],
-        states: ['ses_late' => sessionWatcherState(['has_running_part' => true])],
+        sessions: [],
+        onNotify: function () use (&$shouldFail): bool {
+            return ! $shouldFail;
+        },
         messages: $messages,
     );
 
     $service->check();
 
     expect($messages)->toHaveCount(1)
-        ->and($messages[0]['chat_id'])->toBe($chatId)
-        ->and($messages[0]['text'])->toContain('- Late work (/home/junior/Projects/DevWarden) — trabajando');
+        ->and($messages[0]['text'])->toContain('No hay sesiones de opencode activas')
+        ->and(OpencodeSetting::singleton()->session_watch_boot_reported_at)->toBeNull();
 
-    expect(OpencodeSetting::singleton()->session_watch_boot_reported_at)->not->toBeNull();
+    $shouldFail = false;
+    $service->check();
+
+    expect($messages)->toHaveCount(2)
+        ->and(OpencodeSetting::singleton()->session_watch_boot_reported_at)->not->toBeNull();
 });
 
-test('seals the boot summary without a message once the retry window expires', function () {
+test('never repeats the empty-boot message once the marker is sealed', function () {
     sessionWatcherOwnerChat();
-
-    // Watermark is four minutes old (not yet a detected restart) and the boot
-    // marker was never sealed: the three-minute retry window has expired, so
-    // an empty boot seals without a message instead of retrying forever.
     OpencodeSetting::singleton()->update([
-        'session_watch_since' => now()->subMinutes(4)->startOfSecond(),
+        'session_watch_since' => now()->subMinutes(15),
         'session_watch_boot_reported_at' => null,
     ]);
 
@@ -1542,9 +1689,12 @@ test('seals the boot summary without a message once the retry window expires', f
     $service = sessionWatcherService(sessions: [], messages: $messages);
 
     $service->check();
+    $service->check();
 
-    expect($messages)->toBeEmpty()
-        ->and(OpencodeSetting::singleton()->session_watch_boot_reported_at)->not->toBeNull();
+    expect($messages)->toHaveCount(1)
+        ->and($messages[0]['text'])->toContain('No hay sesiones de opencode activas');
+
+    expect(OpencodeSetting::singleton()->session_watch_boot_reported_at)->not->toBeNull();
 });
 
 test('marks the boot summary as reported only after a successful send', function () {
@@ -1596,6 +1746,247 @@ test('does not break the tick when the boot summary marker cannot be read', func
     $watch = OpencodeSessionWatch::where('session_id', 'ses_active')->first();
 
     expect($watch->last_seen_status)->toBe('working');
+});
+
+test('emits the boot summary on a fast restart when the schedule:work anchor is newer', function () {
+    $chatId = sessionWatcherOwnerChat();
+    $anchor = now()->subMinutes(1)->startOfSecond();
+    OpencodeSetting::singleton()->update([
+        'session_watch_since' => now()->subMinutes(3),
+        'session_watch_boot_reported_at' => null,
+        'schedule_booted_at' => $anchor,
+    ]);
+
+    $messages = [];
+    $service = sessionWatcherService(
+        sessions: [
+            ['id' => 'ses_fast', 'title' => 'Fast work', 'directory' => '/home/junior/Projects/DevWarden', 'time_updated' => sessionWatcherFresh()],
+        ],
+        states: ['ses_fast' => sessionWatcherState(['has_running_part' => true])],
+        messages: $messages,
+    );
+
+    $service->check();
+
+    // The three-minute-old watermark does NOT trip the ten-minute restart
+    // heuristic, yet the newer schedule:work anchor still triggers the boot
+    // summary on the very first tick.
+    expect($messages)->toHaveCount(1)
+        ->and($messages[0]['chat_id'])->toBe($chatId)
+        ->and($messages[0]['text'])->toContain('Sesiones activas desde el inicio del servidor:')
+        ->and($messages[0]['text'])->toContain('- Fast work (/home/junior/Projects/DevWarden) — trabajando');
+
+    $settings = OpencodeSetting::singleton();
+
+    expect($settings->session_watch_since->equalTo($anchor))->toBeTrue()
+        ->and($settings->session_watch_boot_reported_at)->not->toBeNull();
+});
+
+test('boot summary uses the boot grace window around the schedule:work anchor cutoff', function () {
+    sessionWatcherOwnerChat();
+    $anchor = now()->subMinutes(1)->startOfSecond();
+    OpencodeSetting::singleton()->update([
+        'session_watch_since' => now()->subMinutes(3)->startOfSecond(),
+        'session_watch_boot_reported_at' => null,
+        'schedule_booted_at' => $anchor,
+    ]);
+
+    // The session's last update predates the anchor (time_updated two minutes
+    // before the schedule:work start) but still falls inside the five-minute
+    // grace window, so the anchored summary must include it instead of using a
+    // stale cutoff that would miss it.
+    $session = ['id' => 'ses_anchor_grace', 'title' => 'Just before boot', 'directory' => '/home/junior/Projects/DevWarden', 'time_updated' => now()->subMinutes(2)->getTimestampMs()];
+
+    $store = mock(OpencodeSessionStore::class);
+    $store->shouldReceive('activeSessions')->andReturnUsing(
+        function (?int $sinceEpochMs) use ($session): array {
+            if ($sinceEpochMs !== null && $sinceEpochMs < now()->subMinutes(5)->getTimestampMs()) {
+                return [$session];
+            }
+
+            return [];
+        },
+    );
+    $store->shouldReceive('sessionState')->andReturn(sessionWatcherState(['has_running_part' => true]));
+
+    $manager = mock(OpencodeSessionManager::class);
+    $manager->shouldReceive('pendingPermissions')->andReturn([]);
+    $manager->shouldReceive('isAllowedProject')->andReturn(true);
+
+    $messages = [];
+    $notifier = mock(OpencodeNotifier::class);
+    $notifier->shouldReceive('notify')->andReturnUsing(
+        function (int $chatId, string $markdown) use (&$messages): bool {
+            $messages[] = ['chat_id' => $chatId, 'text' => $markdown];
+
+            return true;
+        },
+    );
+
+    $service = new OpencodeSessionWatcher($store, $manager, $notifier, new OpencodeSessionParser);
+
+    $service->check();
+
+    expect($messages)->toHaveCount(1)
+        ->and($messages[0]['text'])->toContain('Sesiones activas desde el inicio del servidor:')
+        ->and($messages[0]['text'])->toContain('- Just before boot (/home/junior/Projects/DevWarden) — trabajando');
+
+    expect(OpencodeSetting::singleton()->session_watch_boot_reported_at)->not->toBeNull();
+});
+
+test('still emits the boot summary through the age heuristic when no boot anchor exists', function () {
+    sessionWatcherOwnerChat();
+    OpencodeSetting::singleton()->update([
+        'session_watch_since' => now()->subMinutes(15),
+        'session_watch_boot_reported_at' => null,
+        'schedule_booted_at' => null,
+    ]);
+
+    $messages = [];
+    $service = sessionWatcherService(
+        sessions: [
+            ['id' => 'ses_legacy', 'title' => 'Legacy work', 'directory' => '/home/junior/Projects/DevWarden', 'time_updated' => sessionWatcherFresh()],
+        ],
+        states: ['ses_legacy' => sessionWatcherState(['has_running_part' => true])],
+        messages: $messages,
+    );
+
+    $service->check();
+
+    expect($messages)->toHaveCount(1)
+        ->and($messages[0]['text'])->toContain('Sesiones activas desde el inicio del servidor:')
+        ->and($messages[0]['text'])->toContain('- Legacy work (/home/junior/Projects/DevWarden) — trabajando');
+});
+
+test('does not emit a boot summary without a restart or a fresh boot anchor', function () {
+    sessionWatcherOwnerChat();
+    OpencodeSetting::singleton()->update([
+        'session_watch_since' => now()->subMinutes(3),
+        'session_watch_boot_reported_at' => now(),
+        'schedule_booted_at' => null,
+    ]);
+
+    $messages = [];
+    $service = sessionWatcherService(
+        sessions: [
+            ['id' => 'ses_steady', 'title' => 'Steady work', 'directory' => '/home/junior/Projects/DevWarden', 'time_updated' => sessionWatcherFresh()],
+        ],
+        states: ['ses_steady' => sessionWatcherState(['has_running_part' => true])],
+        messages: $messages,
+    );
+
+    $service->check();
+    $service->check();
+
+    // No restart (recent watermark) and no anchor: the sealed marker keeps the
+    // boot summary from ever re-emitting, even though a session is working.
+    expect($messages)->toBeEmpty()
+        ->and(OpencodeSetting::singleton()->session_watch_boot_reported_at)->not->toBeNull();
+});
+
+test('does not re-arm the boot summary when the anchor equals the watermark', function () {
+    sessionWatcherOwnerChat();
+    $anchor = now()->subMinutes(1)->startOfSecond();
+    OpencodeSetting::singleton()->update([
+        'session_watch_since' => $anchor,
+        'session_watch_boot_reported_at' => null,
+        'schedule_booted_at' => $anchor,
+    ]);
+
+    $messages = [];
+    $service = sessionWatcherService(
+        sessions: [
+            ['id' => 'ses_equal', 'title' => 'Equal work', 'directory' => '/home/junior/Projects/DevWarden', 'time_updated' => sessionWatcherFresh()],
+        ],
+        states: ['ses_equal' => sessionWatcherState(['has_running_part' => true])],
+        messages: $messages,
+    );
+
+    $service->check();
+    $service->check();
+
+    // The equal anchor is not newer, so the marker is never re-armed on the
+    // second tick: the boot summary is sent exactly once and the watermark is
+    // not spuriously reset to now.
+    expect($messages)->toHaveCount(1)
+        ->and($messages[0]['text'])->toContain('Sesiones activas desde el inicio del servidor:');
+
+    $settings = OpencodeSetting::singleton();
+
+    expect($settings->session_watch_since->equalTo($anchor))->toBeTrue()
+        ->and($settings->session_watch_boot_reported_at)->not->toBeNull();
+});
+
+test('does not re-arm the boot summary when an adopted anchor ages past the restart window', function () {
+    $chatId = sessionWatcherOwnerChat();
+    $anchor = now()->subMinutes(12)->startOfSecond();
+    OpencodeSetting::singleton()->update([
+        'session_watch_since' => $anchor,
+        'session_watch_boot_reported_at' => now(),
+        'schedule_booted_at' => $anchor,
+    ]);
+
+    $messages = [];
+    $service = sessionWatcherService(
+        sessions: [
+            ['id' => 'ses_stale_anchor', 'title' => 'Stale anchor work', 'directory' => '/home/junior/Projects/DevWarden', 'time_updated' => sessionWatcherFresh()],
+        ],
+        states: ['ses_stale_anchor' => sessionWatcherState(['has_running_part' => true])],
+        messages: $messages,
+    );
+
+    $service->check();
+    $service->check();
+
+    // The anchor was already adopted on the first tick (watermark == anchor).
+    // Twelve minutes later it is no longer "newer", but the >10-min age
+    // heuristic must NOT re-arm the marker: a service running for over ten
+    // minutes is not a restart, so no second boot summary may be sent.
+    expect($messages)->toBeEmpty();
+
+    $settings = OpencodeSetting::singleton();
+
+    expect($settings->session_watch_since->equalTo($anchor))->toBeTrue()
+        ->and($settings->session_watch_boot_reported_at)->not->toBeNull();
+});
+
+test('anchored boot summary excludes a waiting session and notifies its question turn', function () {
+    sessionWatcherOwnerChat();
+    OpencodeSetting::singleton()->update([
+        'session_watch_since' => now()->subMinutes(3),
+        'session_watch_boot_reported_at' => null,
+        'schedule_booted_at' => now()->subMinutes(1),
+    ]);
+
+    $messages = [];
+    $service = sessionWatcherService(
+        sessions: [
+            ['id' => 'ses_anchor_q', 'title' => 'Boot question', 'directory' => '/home/junior/Projects/DevWarden', 'time_updated' => sessionWatcherFresh()],
+            ['id' => 'ses_work', 'title' => 'Working', 'directory' => '/home/junior/Projects/DevWarden', 'time_updated' => sessionWatcherFresh()],
+        ],
+        states: [
+            'ses_anchor_q' => sessionWatcherState(['has_running_part' => true, 'last_turn_tool' => 'question']),
+            'ses_work' => sessionWatcherState(['has_running_part' => true]),
+        ],
+        conversations: ['ses_anchor_q' => sessionWatcherTranscript('¿Confirmas la ruta del proyecto?')],
+        messages: $messages,
+    );
+
+    // The second tick fires the question turn: both sessions are newly
+    // discovered on the first tick and only registered, never notified.
+    $service->check();
+    $service->check();
+
+    $summary = collect($messages)->first(fn (array $m): bool => str_contains($m['text'], 'Sesiones activas desde el inicio del servidor:'));
+    $question = collect($messages)->first(fn (array $m): bool => str_contains($m['text'], 'tiene preguntas.'));
+
+    expect($summary)->not->toBeNull()
+        ->and($summary['text'])->toContain('- Working (/home/junior/Projects/DevWarden) — trabajando')
+        ->and($summary['text'])->not->toContain('Boot question');
+
+    expect($question)->not->toBeNull()
+        ->and($question['text'])->toContain('Boot question')
+        ->and($question['text'])->toContain('¿Confirmas la ruta del proyecto?');
 });
 
 test('notifies once per live question turn and again when a new turn starts', function () {
@@ -1705,6 +2096,7 @@ test('keeps the plain question notification when the session has no answer optio
     $messages = [];
     $service = sessionWatcherService(
         sessions: [['id' => 'ses_no_opts', 'title' => 'No options', 'directory' => '/home/junior/Projects/DevWarden', 'time_updated' => sessionWatcherFresh()]],
+        states: ['ses_no_opts' => sessionWatcherState(['has_running_part' => true, 'last_turn_tool' => 'question'])],
         conversations: ['ses_no_opts' => sessionWatcherTranscript('¿Confirmas la ruta del proyecto?')],
         questionOptions: ['ses_no_opts' => []],
         messages: $messages,
@@ -1717,7 +2109,7 @@ test('keeps the plain question notification when the session has no answer optio
         ->and($messages[0]['keyboard'])->toBeNull();
 });
 
-test('notifies finished with the question options as plain text', function () {
+test('notifies a pending-permission session with its question options as plain text', function () {
     $chatId = sessionWatcherOwnerChat();
     OpencodeSessionWatch::factory()->create([
         'session_id' => 'ses_finished_opts',
@@ -1730,6 +2122,9 @@ test('notifies finished with the question options as plain text', function () {
     $service = sessionWatcherService(
         sessions: [['id' => 'ses_finished_opts', 'title' => 'Ask with options', 'directory' => '/home/junior/Projects/DevWarden', 'time_updated' => sessionWatcherFresh()]],
         conversations: ['ses_finished_opts' => sessionWatcherTranscript('¿Confirmas la ruta del proyecto?')],
+        permissions: [
+            ['sessionId' => 'ses_finished_opts', 'permissionId' => 'perm_1', 'text' => 'run command `ls`'],
+        ],
         questionOptions: [
             'ses_finished_opts' => [
                 [
@@ -1809,7 +2204,7 @@ test('notifies a live question turn with the options as plain text', function ()
         ->and($watch->notified_at)->not->toBeNull();
 });
 
-test('lists every question with its lettered options as plain text', function () {
+test('lists every question of a pending-permission session with its lettered options as plain text', function () {
     $chatId = sessionWatcherOwnerChat();
     OpencodeSessionWatch::factory()->create([
         'session_id' => 'ses_multi_opts',
@@ -1822,6 +2217,9 @@ test('lists every question with its lettered options as plain text', function ()
     $service = sessionWatcherService(
         sessions: [['id' => 'ses_multi_opts', 'title' => 'Multi question', 'directory' => '/home/junior/Projects/DevWarden', 'time_updated' => sessionWatcherFresh()]],
         conversations: ['ses_multi_opts' => sessionWatcherTranscript('¿Elige opciones?')],
+        permissions: [
+            ['sessionId' => 'ses_multi_opts', 'permissionId' => 'perm_1', 'text' => 'run command `ls`'],
+        ],
         questionOptions: [
             'ses_multi_opts' => [
                 [

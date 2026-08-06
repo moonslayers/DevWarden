@@ -53,3 +53,41 @@ test('lastAssistantText resolves from a real format transcript', function () {
 
     expect((new OpencodeSessionParser)->lastAssistantText($transcript))->toBe('The answer is 42.');
 });
+
+test('lastAssistantText skips the (no content) literal and falls back to the previous assistant text', function () {
+    $transcript = "--- Message 1 [assistant] (msg_asst1) ---\n"
+        ."Implemented the fix and pushed.\n\n"
+        ."--- Message 2 [assistant] (msg_asst2) ---\n"
+        .'(no content)';
+
+    expect((new OpencodeSessionParser)->lastAssistantText($transcript))->toBe('Implemented the fix and pushed.');
+});
+
+test('lastAssistantText skips consecutive (no content) literals to reach an earlier real assistant', function () {
+    $transcript = "--- Message 1 [assistant] (msg_asst1) ---\n"
+        ."The real summary.\n\n"
+        ."--- Message 2 [assistant] (msg_asst2) ---\n"
+        ."(no content)\n\n"
+        ."--- Message 3 [assistant] (msg_asst3) ---\n"
+        .'(no content)';
+
+    expect((new OpencodeSessionParser)->lastAssistantText($transcript))->toBe('The real summary.');
+});
+
+test('lastAssistantText falls back to the raw conversation when only (no content) assistant blocks remain', function () {
+    $transcript = "--- Message 1 [assistant] (msg_asst1) ---\n"
+        ."(no content)\n\n"
+        ."--- Message 2 [assistant] (msg_asst2) ---\n"
+        .'(no content)';
+
+    expect((new OpencodeSessionParser)->lastAssistantText($transcript))->toBe(trim($transcript));
+});
+
+test('lastAssistantText returns the last real assistant text in a normal transcript', function () {
+    $transcript = "--- Message 1 [assistant] (msg_asst1) ---\n"
+        ."First answer.\n\n"
+        ."--- Message 2 [assistant] (msg_asst2) ---\n"
+        .'Final answer.';
+
+    expect((new OpencodeSessionParser)->lastAssistantText($transcript))->toBe('Final answer.');
+});

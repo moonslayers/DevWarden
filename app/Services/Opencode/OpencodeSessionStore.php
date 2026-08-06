@@ -28,34 +28,84 @@ class OpencodeSessionStore
     public function __construct(private readonly ?string $dbPath = null) {}
 
     /**
-     * List every non-archived session, most recently updated first.
+     * List every non-archived session, most recently active first.
      *
-     * When a since watermark is provided, only sessions with time_updated at or
-     * after it are returned, so sessions that died before the watermark never
-     * reach the watcher. Without a watermark every non-archived session is
-     * listed, regardless of when it was last updated.
+     * When a since watermark is provided, only sessions whose EFFECTIVE
+     * freshness is at or after it are returned. The effective freshness is the
+     * maximum of the session's own time_updated and the time_created of its
+     * most recent part, because opencode does not bump session.time_updated
+     * when it writes a part (e.g. a live 'question' turn) — without the part
+     * fallback an actively-asking session would stay below the watermark and
+     * drop out of discovery. Sessions without parts fall back to their own
+     * time_updated. Without a watermark every non-archived session is listed,
+     * regardless of when it was last active.
+     *
+     * Databases without a part table (test fixtures) degrade to the plain
+     * session.time_updated semantics — the part-freshness query would fail on
+     * a missing table, and a missing part table means there are no parts whose
+     * freshness could revive a stale session.
      *
      * @return list<array{id: string, title: ?string, directory: ?string, time_updated: ?int, parent_id: ?string}>
      */
     public function activeSessions(?int $sinceEpochMs = null): array
     {
         try {
-            $sql = <<<'SQL'
-                SELECT id, title, directory, time_updated, parent_id
-                FROM session
-                WHERE time_archived IS NULL
-                SQL;
+            $pdo = $this->pdo();
 
-            $parameters = [];
+            if ($this->hasPartsTable($pdo)) {
+                $sql = <<<'SQL'
+                    SELECT
+                        id,
+                        title,
+                        directory,
+                        parent_id,
+                        MAX(
+                            session.time_updated,
+                            COALESCE(
+                                (SELECT MAX(part.time_created) FROM part WHERE part.session_id = session.id),
+                                session.time_updated
+                            )
+                        ) AS time_updated
+                    FROM session
+                    WHERE time_archived IS NULL
+                    SQL;
 
-            if ($sinceEpochMs !== null) {
-                $sql .= ' AND time_updated >= :since';
-                $parameters['since'] = $sinceEpochMs;
+                if ($sinceEpochMs !== null) {
+                    $sql .= <<<'SQL'
+                         AND (
+                             session.time_updated >= :since_session
+                             OR EXISTS (
+                                 SELECT 1 FROM part
+                                 WHERE part.session_id = session.id
+                                   AND part.time_created >= :since_part
+                             )
+                         )
+                        SQL;
+                    $parameters = [
+                        'since_session' => $sinceEpochMs,
+                        'since_part' => $sinceEpochMs,
+                    ];
+                } else {
+                    $parameters = [];
+                }
+            } else {
+                $sql = <<<'SQL'
+                    SELECT id, title, directory, time_updated, parent_id
+                    FROM session
+                    WHERE time_archived IS NULL
+                    SQL;
+
+                $parameters = [];
+
+                if ($sinceEpochMs !== null) {
+                    $sql .= ' AND time_updated >= :since';
+                    $parameters['since'] = $sinceEpochMs;
+                }
             }
 
             $sql .= ' ORDER BY time_updated DESC';
 
-            $statement = $this->pdo()->prepare($sql);
+            $statement = $pdo->prepare($sql);
             $statement->execute($parameters);
 
             $rows = $statement->fetchAll(PDO::FETCH_ASSOC);
@@ -418,6 +468,19 @@ class OpencodeSessionStore
     public static function escapeLike(string $value): string
     {
         return str_replace(['\\', '%', '_'], ['\\\\', '\\%', '\\_'], $value);
+    }
+
+    /**
+     * Whether the opencode database has a part table.
+     *
+     * Old or partial databases (and test fixtures) may only carry the session
+     * table; the part-freshness discovery must not reference a missing table.
+     */
+    protected function hasPartsTable(PDO $pdo): bool
+    {
+        $statement = $pdo->query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'part'");
+
+        return (bool) $statement->fetchColumn();
     }
 
     /**

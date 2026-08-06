@@ -96,16 +96,6 @@ class OpencodeSessionWatcher
      */
     private const DISCOVERY_GRACE_MINUTES = 5;
 
-    /**
-     * How long after a detected restart the watcher keeps retrying the boot
-     * summary while no relevant session has appeared. Within this window an
-     * empty result does NOT seal the boot-reported marker, so a session that
-     * becomes visible a tick or two after boot is still reported. Once the
-     * window expires the marker is sealed without a message so a genuinely
-     * empty boot never retries forever.
-     */
-    private const BOOT_SUMMARY_RETRY_WINDOW_MINUTES = 3;
-
     public function __construct(
         private readonly OpencodeSessionStore $store,
         private readonly OpencodeSessionManager $manager,
@@ -165,10 +155,11 @@ class OpencodeSessionWatcher
 
         // The boot summary is also evaluated when discovery returned an empty
         // list: the grace window may still surface sessions active just before
-        // the restart, and an empty result must not seal the marker while the
-        // retry window is still open. Sessions waiting for the user's answer
-        // are excluded from the summary: each one gets its own question-turn
-        // notification (with the actual question) from the session loop below.
+        // the restart, and an empty result now sends an immediate "no active
+        // sessions" message so the owner always gets a boot notification.
+        // Sessions waiting for the user's answer are excluded from the summary:
+        // each one gets its own question-turn notification (with the actual
+        // question) from the session loop below.
         $this->maybeSendBootSummary($sessions, $chatId, $since, $excludedSessionIds, $dismissedSessionIds);
 
         foreach ($sessions as $session) {
@@ -215,11 +206,24 @@ class OpencodeSessionWatcher
     /**
      * Resolve the session-watch watermark in epoch milliseconds.
      *
-     * On the first run (null watermark) and after a restart (more than ten
-     * minutes since the last tick) the watermark is reset to "now", so only
-     * sessions with activity since the service started are ever discovered.
-     * The watermark stays fixed between restarts so idle sessions waiting for
-     * input remain discoverable.
+     * The schedule:work boot anchor (schedule_booted_at) is the authoritative
+     * restart signal: it is stamped the moment schedule:work actually starts,
+     * so a restart of dev:full inside the ten-minute window — invisible to the
+     * age heuristic below — is still detected on the first monitor tick. When
+     * the anchor is newer than the current watermark the restart is re-armed
+     * with the anchor as the new watermark, so a fast restart re-emits the boot
+     * summary immediately instead of waiting for the old watermark to age out.
+     *
+     * Once the anchor has been adopted (the watermark equals the anchor), a
+     * later tick must NOT re-arm anything: the anchor is no longer "newer" and
+     * the service having run for more than ten minutes is not a restart. The
+     * age heuristic below is therefore exclusive to installs without the anchor.
+     *
+     * Without the anchor the watermark resets to "now" on the first run (null
+     * watermark) and after a restart (more than ten minutes since the last
+     * tick), so only sessions with activity since the service started are ever
+     * discovered. The watermark stays fixed between restarts so idle sessions
+     * waiting for input remain discoverable.
      */
     private function resolveWatchSince(): ?int
     {
@@ -227,10 +231,32 @@ class OpencodeSessionWatcher
 
         $since = $settings->session_watch_since;
 
+        $scheduleBootedAt = $settings->schedule_booted_at;
+
+        if ($scheduleBootedAt !== null) {
+            // A restart detected via the anchor also re-arms the boot summary
+            // marker, so this boot emits exactly one "sessions active since
+            // startup" report.
+            if ($since === null || $scheduleBootedAt->isAfter($since)) {
+                $settings->session_watch_boot_reported_at = null;
+                $settings->session_watch_since = $scheduleBootedAt;
+                $settings->save();
+
+                $since = $settings->session_watch_since;
+            }
+
+            // An anchor that has already been adopted (watermark >= anchor) is
+            // NOT a restart, even once the watermark is older than the restart
+            // window: return the current watermark untouched so the boot summary
+            // marker is never re-armed mid-service. The >10-min age heuristic
+            // below must not apply to installs that have an anchor.
+            return $since?->getTimestampMs();
+        }
+
+        // Fallback for installs without the boot anchor: a watermark older
+        // than the monitor's overlap window still detects the restart.
         if ($since === null
             || $since->diffInMinutes(now()) > self::WATCH_WATERMARK_RESTART_MINUTES) {
-            // A detected restart also re-arms the boot summary marker, so this
-            // boot emits exactly one "sessions active since startup" report.
             $settings->session_watch_boot_reported_at = null;
             $settings->session_watch_since = now();
             $settings->save();
@@ -314,8 +340,13 @@ class OpencodeSessionWatcher
         );
 
         // A freshly discovered session is only registered, never notified, so
-        // historical sessions do not spam the owner on the first tick.
+        // historical sessions do not spam the owner on the first tick. The one
+        // exception is a session already waiting on a live 'question' turn:
+        // inspecting it on the discovery tick removes a full tick of latency
+        // without breaking the anti-spam contract (see inspectFreshSession).
         if ($watch->wasRecentlyCreated) {
+            $this->inspectFreshSession($watch, $session, $chatId);
+
             return;
         }
 
@@ -465,6 +496,76 @@ class OpencodeSessionWatcher
     }
 
     /**
+     * Inspect a freshly discovered session, notifying only a live question turn.
+     *
+     * A newly registered watch is born 'unknown', so the working -> stopped
+     * finish and the terminal-error branches can never fire on the first
+     * sighting (they need a previously observed 'working' status or an error
+     * part on a non-fresh session), and a session without a live question turn
+     * is left register-only exactly like the old early return. The exception
+     * is a session already paused on a live 'question' tool: its
+     * last_notified_event is still null (never notified), so reporting the
+     * turn on the discovery tick neither spams history nor re-notifies, and
+     * the owner no longer waits a full extra tick for a turn that already
+     * exists. Sub-agent sessions (parent_id set) are never inspected here.
+     *
+     * @param  array{id: string, title: ?string, directory: ?string, time_updated: ?int, parent_id: ?string}  $session
+     */
+    private function inspectFreshSession(OpencodeSessionWatch $watch, array $session, int $chatId): void
+    {
+        if (($session['parent_id'] ?? null) !== null) {
+            return;
+        }
+
+        try {
+            $state = $this->store->sessionState($session['id']);
+        } catch (Throwable $e) {
+            Log::warning('OpencodeSessionWatcher: failed to resolve session state for a freshly discovered session.', [
+                'session_id' => $session['id'],
+                'error' => $e->getMessage(),
+            ]);
+
+            return;
+        }
+
+        if (! $state['has_running_part'] || $state['last_turn_tool'] !== 'question') {
+            return;
+        }
+
+        $directory = $state['directory'] ?? $session['directory'];
+
+        if ($directory === null) {
+            Log::debug('OpencodeSessionWatcher: session has no directory, skipping.', [
+                'session_id' => $session['id'],
+            ]);
+
+            return;
+        }
+
+        try {
+            $allowed = $this->manager->isAllowedProject($directory);
+        } catch (Throwable $e) {
+            Log::debug('OpencodeSessionWatcher: failed to validate session directory, skipping.', [
+                'session_id' => $session['id'],
+                'error' => $e->getMessage(),
+            ]);
+
+            return;
+        }
+
+        if (! $allowed) {
+            Log::debug('OpencodeSessionWatcher: session directory outside allowed projects, skipping.', [
+                'session_id' => $session['id'],
+                'directory' => $directory,
+            ]);
+
+            return;
+        }
+
+        $this->notifyQuestionTurn($watch, $session, $chatId, $directory);
+    }
+
+    /**
      * Track a sub-agent session's watch row without ever notifying the owner.
      *
      * The row is kept consistent with the session classification (working while
@@ -520,13 +621,12 @@ class OpencodeSessionWatcher
 
         $last = $this->parser->lastAssistantText($conversation);
         $summary = $this->parser->truncate($last, self::SUMMARY_MAX_LENGTH);
-        $hasQuestion = $this->parser->hasQuestions($last)
-            || in_array($session['id'], $permissionSessionIds, true);
+        $hasPendingPermission = in_array($session['id'], $permissionSessionIds, true);
 
-        $event = $hasQuestion ? 'question' : 'finished';
+        $event = $hasPendingPermission ? 'question' : 'finished';
         $title = $this->resolveTitle($session, $watch);
 
-        if ($hasQuestion) {
+        if ($hasPendingPermission) {
             $message = $this->buildQuestionNotification(
                 $title,
                 $session['id'],
@@ -710,11 +810,11 @@ class OpencodeSessionWatcher
      * The boot summary is armed when resolveWatchSince detects a restart and
      * persisted only once it has actually been sent, so a successful boot
      * reports exactly once. A failed notify leaves the marker unset and the
-     * next tick retries. When no relevant session exists yet, the marker is
-     * NOT sealed while the retry window is open: the session may only become
-     * visible a tick or two after the restart. Only once the retry window
-     * expires (no real activity since boot) is the marker sealed without a
-     * message, so a genuinely empty boot does not retry forever.
+     * next tick retries. When no relevant session exists, an immediate
+     * "system started with no active sessions" message is sent in the same
+     * tick so the owner always receives at least one boot notification, and
+     * the marker is sealed only after that send succeeds — a failed send is
+     * retried on the next tick exactly like the non-empty branch.
      *
      * @param  list<array{id: string, title: ?string, directory: ?string, time_updated: ?int, parent_id: ?string}>  $sessions
      * @param  list<string>  $excludedSessionIds
@@ -747,17 +847,11 @@ class OpencodeSessionWatcher
             $dismissedSessionIds,
         );
 
-        if ($relevant === []) {
-            if ($this->isWithinBootRetryWindow($settings)) {
-                return;
-            }
+        $message = $relevant === []
+            ? $this->formatBootSummaryEmpty()
+            : $this->formatBootSummary($relevant);
 
-            $this->markBootSummaryReported($settings);
-
-            return;
-        }
-
-        $sent = $this->notifier->notify($chatId, $this->formatBootSummary($relevant));
+        $sent = $this->notifier->notify($chatId, $message);
 
         if (! $sent) {
             Log::warning('OpencodeSessionWatcher: boot summary notification failed, will retry next tick.', []);
@@ -796,19 +890,6 @@ class OpencodeSessionWatcher
 
             return $sessions;
         }
-    }
-
-    /**
-     * Whether the boot summary retry window (from the session-watch watermark)
-     * is still open, meaning an empty result should keep retrying instead of
-     * sealing the marker.
-     */
-    private function isWithinBootRetryWindow(OpencodeSetting $settings): bool
-    {
-        $bootedAt = $settings->session_watch_since;
-
-        return $bootedAt !== null
-            && $bootedAt->isAfter(now()->subMinutes(self::BOOT_SUMMARY_RETRY_WINDOW_MINUTES));
     }
 
     /**
@@ -878,6 +959,15 @@ class OpencodeSessionWatcher
         );
 
         return "Sesiones activas desde el inicio del servidor:\n".implode("\n", $lines);
+    }
+
+    /**
+     * Message sent when the boot summary finds no relevant session, so the
+     * owner always receives at least one notification per detected restart.
+     */
+    private function formatBootSummaryEmpty(): string
+    {
+        return 'Sistema DevWarden iniciado. No hay sesiones de opencode activas.';
     }
 
     /**

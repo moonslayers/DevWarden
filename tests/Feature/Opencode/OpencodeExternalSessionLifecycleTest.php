@@ -310,7 +310,8 @@ test('walks the full external session lifecycle: boot report, question turns, fi
 
     expect($messages)->toHaveCount($before);
 
-    // A fresh restart also leaves the dismissed session out of the boot summary.
+    // A fresh restart leaves the dismissed session out of the boot summary,
+    // but the boot still reports with the empty-boot message.
     OpencodeSetting::singleton()->update([
         'session_watch_since' => now()->subMinutes(15),
         'session_watch_boot_reported_at' => null,
@@ -318,7 +319,10 @@ test('walks the full external session lifecycle: boot report, question turns, fi
 
     $watcher->check();
 
-    expect($messages)->toHaveCount($before);
+    expect($messages)->toHaveCount($before + 1)
+        ->and($messages[$before]['text'])->toContain('Sistema DevWarden iniciado')
+        ->and($messages[$before]['text'])->toContain('No hay sesiones de opencode activas')
+        ->and($messages[$before]['text'])->not->toContain($title);
 
     // ---------------------------------------------------------------------
     // Phase 6 - Remember + reactivate: search, undo the dismissal, ask again.
@@ -349,4 +353,93 @@ test('walks the full external session lifecycle: boot report, question turns, fi
     expect($againCall['sessionId'])->toBe($sessionId)
         ->and($againCall['directory'])->toBe($directory)
         ->and($againCall['prompt'])->toBe('Keep going');
+});
+
+test('discovers and question-notifies in one tick a session whose question part is fresh but session.time_updated is stale', function () {
+    $chatId = externalLifecycleOwnerChat();
+    $sessionId = 'ses_stale_updated_question';
+    $directory = '/home/junior/Projects/DevWarden';
+    $title = 'Background session asking questions';
+
+    $manager = new ExternalLifecycleOpencodeManager;
+
+    // Real incident shape: opencode does NOT bump session.time_updated when it
+    // writes a question part, so the session row is stale (below the discovery
+    // cutoff) while the question part itself is fresh (after the cutoff). With
+    // a fresh watermark the cutoff is watermark - DISCOVERY_GRACE_MINUTES (5).
+    $now = now();
+    $staleUpdated = $now->subMinutes(6)->getTimestampMs();
+    $freshQuestionAt = $now->subMinutes(4)->getTimestampMs();
+
+    $path = OpencodeStoreFixture::create(
+        sessions: [
+            ['id' => $sessionId, 'title' => $title, 'directory' => $directory, 'time_created' => $staleUpdated, 'time_updated' => $staleUpdated, 'time_archived' => null],
+        ],
+        parts: [
+            externalLifecycleToolPart('part_q_fresh', $sessionId, $freshQuestionAt, 'question'),
+        ],
+    );
+
+    $store = new OpencodeSessionStore($path);
+
+    // Re-arm a fresh watermark; the boot marker stays set (beforeEach) so the
+    // boot summary cannot add a second message to this tick.
+    OpencodeSetting::singleton()->update(['session_watch_since' => now()]);
+
+    $manager->conversation = externalLifecycleTranscript('¿Aplico los cambios?');
+
+    $messages = [];
+    $watcher = externalLifecycleWatcher($store, $manager, $messages);
+
+    // ONE tick discovers the session (via the fresh question part) AND sends
+    // the question-turn notification: no +1 tick latency.
+    $watcher->check();
+
+    expect($messages)->toHaveCount(1)
+        ->and($messages[0]['chat_id'])->toBe($chatId)
+        ->and($messages[0]['text'])->toContain('tiene preguntas.')
+        ->and($messages[0]['text'])->toContain('¿Aplico los cambios?');
+
+    $watch = OpencodeSessionWatch::where('session_id', $sessionId)->first();
+
+    expect($watch)->not->toBeNull()
+        ->and($watch->last_notified_event)->toBe('question')
+        ->and($watch->last_seen_status)->toBe('working');
+
+    // The same pending turn is not re-notified on the next tick.
+    $watcher->check();
+
+    expect($messages)->toHaveCount(1);
+});
+
+test('does not discover a session whose session.time_updated and all parts predate the discovery cutoff', function () {
+    $chatId = externalLifecycleOwnerChat();
+    $sessionId = 'ses_all_stale';
+    $directory = '/home/junior/Projects/DevWarden';
+    $title = 'Ancient background session';
+
+    $manager = new ExternalLifecycleOpencodeManager;
+
+    // Both freshness sources are older than the grace-windowed cutoff, so the
+    // session is invisible and the watcher never even registers a watch row.
+    $old = now()->subMinutes(20)->getTimestampMs();
+
+    $path = OpencodeStoreFixture::create(
+        sessions: [
+            ['id' => $sessionId, 'title' => $title, 'directory' => $directory, 'time_created' => $old, 'time_updated' => $old, 'time_archived' => null],
+        ],
+        parts: [
+            externalLifecycleToolPart('part_q_old', $sessionId, $old, 'question'),
+        ],
+    );
+
+    $store = new OpencodeSessionStore($path);
+
+    $messages = [];
+    $watcher = externalLifecycleWatcher($store, $manager, $messages);
+
+    $watcher->check();
+
+    expect($messages)->toHaveCount(0);
+    expect(OpencodeSessionWatch::where('session_id', $sessionId)->exists())->toBeFalse();
 });

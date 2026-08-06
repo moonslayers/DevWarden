@@ -265,6 +265,104 @@ test('activeSessions with a since watermark only returns sessions updated at or 
     expect($sessions[0]['time_updated'])->toBe($fresh);
 });
 
+test('activeSessions with a since watermark returns a session whose most recent part is fresh even when session.time_updated is stale', function () {
+    $since = now()->subHours(1)->getTimestampMs();
+    $staleUpdated = $since - 1000;
+    $freshPart = $since + 1000;
+
+    $store = new OpencodeSessionStore(OpencodeStoreFixture::create(
+        sessions: [
+            ['id' => 'ses_part_fresh', 'title' => 'Part Fresh', 'directory' => '/projects/a', 'time_created' => $staleUpdated, 'time_updated' => $staleUpdated, 'time_archived' => null],
+        ],
+        parts: [
+            opencodeTextPart('part_1', 'ses_part_fresh', $freshPart),
+        ],
+    ));
+
+    $sessions = $store->activeSessions($since);
+
+    expect(array_column($sessions, 'id'))->toBe(['ses_part_fresh']);
+    expect($sessions[0]['time_updated'])->toBe($freshPart);
+});
+
+test('activeSessions with a since watermark still returns a session whose session.time_updated is fresh', function () {
+    $since = now()->subHours(1)->getTimestampMs();
+    $freshUpdated = $since + 1000;
+    $stalePart = $since - 1000;
+
+    $store = new OpencodeSessionStore(OpencodeStoreFixture::create(
+        sessions: [
+            ['id' => 'ses_session_fresh', 'title' => 'Session Fresh', 'directory' => '/projects/a', 'time_created' => $stalePart, 'time_updated' => $freshUpdated, 'time_archived' => null],
+        ],
+        parts: [
+            opencodeTextPart('part_1', 'ses_session_fresh', $stalePart),
+        ],
+    ));
+
+    $sessions = $store->activeSessions($since);
+
+    expect(array_column($sessions, 'id'))->toBe(['ses_session_fresh']);
+    expect($sessions[0]['time_updated'])->toBe($freshUpdated);
+});
+
+test('activeSessions with a since watermark excludes a session whose session.time_updated and parts are all stale', function () {
+    $since = now()->subHours(1)->getTimestampMs();
+    $stale = $since - 1000;
+
+    $store = new OpencodeSessionStore(OpencodeStoreFixture::create(
+        sessions: [
+            ['id' => 'ses_stale', 'title' => 'Stale', 'directory' => '/projects/a', 'time_created' => $stale, 'time_updated' => $stale, 'time_archived' => null],
+        ],
+        parts: [
+            opencodeTextPart('part_1', 'ses_stale', $stale - 500),
+            opencodeToolPart('part_2', 'ses_stale', $stale, 'completed'),
+        ],
+    ));
+
+    expect($store->activeSessions($since))->toBe([]);
+});
+
+test('activeSessions with a since watermark falls back to session.time_updated when a session has no parts', function () {
+    $since = now()->subHours(1)->getTimestampMs();
+    $boundary = $since;
+    $old = $since - 1000;
+
+    $store = new OpencodeSessionStore(OpencodeStoreFixture::create(
+        sessions: [
+            ['id' => 'ses_no_parts', 'title' => 'No Parts', 'directory' => '/projects/a', 'time_created' => $old, 'time_updated' => $boundary, 'time_archived' => null],
+            ['id' => 'ses_no_parts_stale', 'title' => 'No Parts Stale', 'directory' => '/projects/b', 'time_created' => $old, 'time_updated' => $old, 'time_archived' => null],
+        ],
+    ));
+
+    $sessions = $store->activeSessions($since);
+
+    expect(array_column($sessions, 'id'))->toBe(['ses_no_parts']);
+    expect($sessions[0]['time_updated'])->toBe($boundary);
+});
+
+test('activeSessions orders a session with a fresh part above a session with a stale time_updated', function () {
+    $since = now()->subHours(1)->getTimestampMs();
+    $stale = $since - 1000;
+    $freshPart = $since + 2000;
+    $freshUpdated = $since + 1000;
+
+    $store = new OpencodeSessionStore(OpencodeStoreFixture::create(
+        sessions: [
+            ['id' => 'ses_stale_updated', 'title' => 'Stale Updated', 'directory' => '/projects/a', 'time_created' => $stale, 'time_updated' => $stale, 'time_archived' => null],
+            ['id' => 'ses_updated_fresh', 'title' => 'Updated Fresh', 'directory' => '/projects/b', 'time_created' => $stale, 'time_updated' => $freshUpdated, 'time_archived' => null],
+        ],
+        parts: [
+            opencodeTextPart('part_1', 'ses_stale_updated', $freshPart),
+        ],
+    ));
+
+    $sessions = $store->activeSessions($since);
+
+    expect(array_column($sessions, 'id'))->toBe(['ses_stale_updated', 'ses_updated_fresh']);
+    expect($sessions[0]['time_updated'])->toBe($freshPart);
+    expect($sessions[1]['time_updated'])->toBe($freshUpdated);
+});
+
 test('searchSessions matches sessions by title substring', function () {
     $store = new OpencodeSessionStore(OpencodeStoreFixture::create(
         sessions: [

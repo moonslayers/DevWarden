@@ -12,12 +12,32 @@ namespace App\Services\Opencode;
 final class OpencodeSessionParser
 {
     /**
-     * Last non-empty assistant block text, falling back to the raw conversation.
+     * Placeholder literals that opencode-mcp v1.11 emits as the whole text of an
+     * assistant message that carries no real content (e.g. a message that only
+     * made tool calls). They are not empty, so lastAssistantText() must skip them
+     * and fall back to the previous assistant block with real text. `(no content)`
+     * is emitted verbatim when a message has neither text parts nor recognizable
+     * tool parts (verified against the installed opencode-mcp `dist/helpers.js`).
+     * The "Agent performed N action(s):" template is intentionally NOT listed: it
+     * is not a fixed literal (it embeds a count and tool summaries), and those
+     * summaries carry real, useful content.
+     *
+     * @var array<int, string>
+     */
+    private const NON_DESCRIPTIVE_LITERALS = [
+        '(no content)',
+    ];
+
+    /**
+     * Last assistant block text with real content, falling back to the raw
+     * conversation when no assistant block has descriptive text.
      */
     public function lastAssistantText(string $conversation): string
     {
         foreach (array_reverse($this->conversationBlocks($conversation)) as $block) {
-            if ($block['role'] === 'assistant' && $block['text'] !== '') {
+            if ($block['role'] === 'assistant'
+                && $block['text'] !== ''
+                && ! in_array($block['text'], self::NON_DESCRIPTIVE_LITERALS, true)) {
                 return $block['text'];
             }
         }
