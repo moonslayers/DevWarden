@@ -25,6 +25,18 @@ class OpencodeSessionStore
      */
     private const DEFAULT_DATA_DB_PATH = '/.local/share/opencode/opencode.db';
 
+    /**
+     * Long free-text part fields (text, input, output) are capped at this many
+     * characters so a single giant tool output never floods memory or the
+     * model's context when a session is read.
+     */
+    private const LONG_FIELD_CAP = 2000;
+
+    /**
+     * Upper bound for the recentParts() limit window.
+     */
+    private const MAX_PARTS_LIMIT = 50;
+
     public function __construct(private readonly ?string $dbPath = null) {}
 
     /**
@@ -421,6 +433,175 @@ class OpencodeSessionStore
 
             return [];
         }
+    }
+
+    /**
+     * Read a window of a session's significant parts in chronological order.
+     *
+     * opencode writes a lot of bookkeeping parts (reasoning, step-start,
+     * step-finish, compaction) that carry no user-facing content; they are
+     * excluded in SQL so the window only contains meaningful messages, tool
+     * calls and agent spawns. The role is read from the joined message row
+     * (opencode stores it in message.data.role, not on the part), and parts
+     * without a message row are kept with a null role via the LEFT JOIN. Long
+     * free-text fields are capped and array inputs/outputs are flattened to a
+     * single line so a giant bash output never floods memory. A task tool's
+     * sub-session id comes from its metadata, and its agent name is resolved
+     * from the first agent part of that sub-session when available.
+     *
+     * direction='last' returns the most recent parts, direction='first' the
+     * oldest ones; both orders ascend chronologically.
+     *
+     * @return list<array{
+     *     time_created: int,
+     *     role: ?string,
+     *     type: string,
+     *     tool: ?string,
+     *     status: ?string,
+     *     agent_name: ?string,
+     *     sub_session_id: ?string,
+     *     text: ?string,
+     *     input: ?string,
+     *     output: ?string
+     * }>
+     */
+    public function recentParts(string $sessionId, int $limit = 5, string $direction = 'last'): array
+    {
+        try {
+            $limit = max(1, min(self::MAX_PARTS_LIMIT, $limit));
+            $order = $direction === 'first' ? 'ASC' : 'DESC';
+
+            $sql = <<<'SQL'
+                SELECT
+                    part.time_created,
+                    json_extract(message.data, '$.role') AS role,
+                    json_extract(part.data, '$.type') AS type,
+                    json_extract(part.data, '$.tool') AS tool,
+                    json_extract(part.data, '$.state.status') AS status,
+                    CASE
+                        WHEN json_extract(part.data, '$.type') = 'agent' THEN json_extract(part.data, '$.name')
+                        WHEN json_extract(part.data, '$.type') = 'tool'
+                             AND json_extract(part.data, '$.tool') = 'task'
+                             AND json_extract(part.data, '$.state.metadata.sessionId') IS NOT NULL
+                        THEN (
+                            SELECT json_extract(sub_agent.data, '$.name')
+                            FROM part AS sub_agent
+                            WHERE sub_agent.session_id = json_extract(part.data, '$.state.metadata.sessionId')
+                              AND json_extract(sub_agent.data, '$.type') = 'agent'
+                            ORDER BY sub_agent.time_created ASC, sub_agent.rowid ASC
+                            LIMIT 1
+                        )
+                    END AS agent_name,
+                    CASE
+                        WHEN json_extract(part.data, '$.type') = 'tool'
+                             AND json_extract(part.data, '$.tool') = 'task'
+                        THEN json_extract(part.data, '$.state.metadata.sessionId')
+                    END AS sub_session_id,
+                    json_extract(part.data, '$.text') AS text,
+                    json_extract(part.data, '$.state.input') AS input,
+                    COALESCE(
+                        NULLIF(json_extract(part.data, '$.state.metadata.output'), ''),
+                        json_extract(part.data, '$.state.output')
+                    ) AS output
+                FROM part
+                LEFT JOIN message ON message.id = part.message_id
+                WHERE part.session_id = :session_id
+                  AND json_extract(part.data, '$.type') NOT IN ('reasoning', 'step-start', 'step-finish', 'compaction')
+                SQL;
+
+            $sql .= " ORDER BY part.time_created {$order}, part.rowid {$order}";
+
+            $sql .= ' LIMIT '.$limit;
+
+            $statement = $this->pdo()->prepare($sql);
+            $statement->execute(['session_id' => $sessionId]);
+
+            $rows = $statement->fetchAll(PDO::FETCH_ASSOC);
+
+            if ($order === 'DESC') {
+                $rows = array_reverse($rows);
+            }
+
+            return array_map(
+                fn (array $row): array => [
+                    'time_created' => (int) $row['time_created'],
+                    'role' => $row['role'] !== null ? (string) $row['role'] : null,
+                    'type' => (string) $row['type'],
+                    'tool' => $row['tool'] !== null ? (string) $row['tool'] : null,
+                    'status' => $row['status'] !== null ? (string) $row['status'] : null,
+                    'agent_name' => $row['agent_name'] !== null ? (string) $row['agent_name'] : null,
+                    'sub_session_id' => $row['sub_session_id'] !== null ? (string) $row['sub_session_id'] : null,
+                    'text' => $this->truncateField($row['text']),
+                    'input' => $this->compactField($row['input']),
+                    'output' => $this->compactField($row['output']),
+                ],
+                $rows,
+            );
+        } catch (Throwable $e) {
+            Log::debug('OpencodeSessionStore: failed to read session parts.', [
+                'session_id' => $sessionId,
+                'limit' => $limit,
+                'direction' => $direction,
+                'db_path' => $this->dbPath(),
+                'error' => $e->getMessage(),
+            ]);
+
+            return [];
+        }
+    }
+
+    /**
+     * Truncate a free-text field to the configured cap.
+     */
+    private function truncateField(mixed $value): ?string
+    {
+        if ($value === null) {
+            return null;
+        }
+
+        $text = (string) $value;
+
+        if (mb_strlen($text) <= self::LONG_FIELD_CAP) {
+            return $text;
+        }
+
+        return mb_substr($text, 0, self::LONG_FIELD_CAP);
+    }
+
+    /**
+     * Flatten a part input/output value into a compact single-line string.
+     *
+     * JSON object/array values (json_extract returns them as JSON text) are
+     * decoded and re-encoded without surrounding whitespace; plain strings are
+     * returned as they are. The result is always capped to LONG_FIELD_CAP
+     * characters so oversized bash outputs never flood memory.
+     */
+    private function compactField(mixed $value): ?string
+    {
+        if ($value === null) {
+            return null;
+        }
+
+        $text = (string) $value;
+        $decoded = json_decode($text, true);
+
+        if (is_array($decoded)) {
+            $encoded = json_encode($decoded, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+
+            if (is_string($encoded)) {
+                $flattened = preg_replace('/\s+/', ' ', $encoded);
+
+                if (is_string($flattened)) {
+                    $text = $flattened;
+                }
+            }
+        }
+
+        if (mb_strlen($text) <= self::LONG_FIELD_CAP) {
+            return $text;
+        }
+
+        return mb_substr($text, 0, self::LONG_FIELD_CAP);
     }
 
     /**

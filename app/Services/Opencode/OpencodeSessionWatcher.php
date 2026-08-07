@@ -55,6 +55,16 @@ class OpencodeSessionWatcher
     private const STABLE_RECHECK_MINUTES = 5;
 
     /**
+     * A stopped session is only reported as finished after it has stayed idle
+     * for this many minutes. opencode writes "thinking gaps" between tool calls
+     * (step-finish -> step-start -> reasoning) with no running part, so a live
+     * session can look stopped for tens of seconds; a genuine finish is
+     * indistinguishable from a transient gap in the database, so idle time is
+     * the only reliable discriminator before confirming "La sesión ... terminó".
+     */
+    private const FINISH_CONFIRM_MINUTES = 3;
+
+    /**
      * A session whose error was already notified within this many hours is not
      * notified again, regardless of later state transitions.
      */
@@ -476,12 +486,28 @@ class OpencodeSessionWatcher
             return;
         }
 
-        // Only a live working -> stopped transition notifies. Sessions found
-        // already stopped on the first tick (history) never notify, so the
-        // store's current-day cutoff alone cannot produce a notification.
-        $shouldNotify = $watch->last_seen_status === 'working';
+        // A stop is only reported as finished once the session has stayed idle
+        // for the confirmation window. opencode writes "thinking gaps" between
+        // tool calls (step-finish -> step-start -> reasoning) with no running
+        // part, so a live session can look stopped for tens of seconds, and a
+        // genuine finish is indistinguishable from a transient gap in the
+        // database — the only reliable discriminator is idle time. The first
+        // observation turns the watch into a 'stopping' candidate without
+        // notifying; the candidate is confirmed only after the window elapses,
+        // and is cleared silently by the working branch as soon as the session
+        // runs again.
+        //
+        // The confirm clock uses the discovery row's effective freshness
+        // (MAX(session.time_updated, MAX(part.time_created))), which equals the
+        // session's last real activity once stopped — unlike the raw $updatedAt
+        // above, which feeds only the freshness gate.
+        $effectiveUpdatedAt = $this->updatedAtFromEpochMs($session['time_updated'] ?? null);
 
-        if (! $shouldNotify) {
+        // A session whose effective last-activity cannot be resolved must not
+        // become a permanent 'stopping' candidate (never confirming, never
+        // falling to 'stopped'), so it takes the register-only outcome exactly
+        // like a fresh/unknown/error watch.
+        if ($effectiveUpdatedAt === null) {
             $watch->forceFill([
                 'last_seen_status' => 'stopped',
                 'title' => $this->resolveTitle($session, $watch),
@@ -492,7 +518,41 @@ class OpencodeSessionWatcher
             return;
         }
 
-        $this->notifyFinished($watch, $session, $chatId, $permissionSessionIds, $directory);
+        $idleMinutes = $effectiveUpdatedAt->diffInMinutes(now());
+        $confirmFinished = $idleMinutes >= self::FINISH_CONFIRM_MINUTES;
+
+        if (($watch->last_seen_status === 'working' || $watch->last_seen_status === 'stopping')
+            && $confirmFinished) {
+            $this->notifyFinished($watch, $session, $chatId, $permissionSessionIds, $directory);
+
+            return;
+        }
+
+        if ($watch->last_seen_status === 'working' || $watch->last_seen_status === 'stopping') {
+            // 'working': first observation of the stop, promote the watch to a
+            // 'stopping' candidate so the next tick can either confirm the
+            // finish or clear it on a resume. 'stopping': still inside the
+            // window, keep the candidate re-checked every tick — the
+            // STABLE_RECHECK_MINUTES guard only matches confirmed 'stopped'
+            // watches, never candidates.
+            $watch->forceFill([
+                'last_seen_status' => 'stopping',
+                'title' => $this->resolveTitle($session, $watch),
+                'project_path' => $directory,
+                'checked_at' => now(),
+            ])->save();
+
+            return;
+        }
+
+        // 'unknown' (fresh watch), 'error' or 'stopped': register-only, so
+        // history found already stopped on the first tick never notifies.
+        $watch->forceFill([
+            'last_seen_status' => 'stopped',
+            'title' => $this->resolveTitle($session, $watch),
+            'project_path' => $directory,
+            'checked_at' => now(),
+        ])->save();
     }
 
     /**

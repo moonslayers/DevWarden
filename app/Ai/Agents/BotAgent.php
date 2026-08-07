@@ -18,6 +18,7 @@ use App\Ai\Tools\Opencode\OpencodeStopWorkflowTool;
 use App\Ai\Tools\Opencode\OpencodeWorkflowContext;
 use App\Ai\Tools\Opencode\OpencodeWorkflowStatusTool;
 use App\Ai\Tools\Opencode\ReactivateSessionTool;
+use App\Ai\Tools\Opencode\ReadSessionTool;
 use App\Ai\Tools\Opencode\SearchSessionsTool;
 use App\Enums\OpencodeWorkflowStatus;
 use App\Models\BotMemory;
@@ -102,6 +103,7 @@ class BotAgent implements Agent, Conversational, HasTools
             new ReactivateSessionTool,
             new AbortSessionTool,
             new SearchSessionsTool,
+            new ReadSessionTool,
         ];
 
         if (BotSubAgent::activeVision() !== null) {

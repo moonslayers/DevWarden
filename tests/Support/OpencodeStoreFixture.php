@@ -15,13 +15,17 @@ use PDO;
 class OpencodeStoreFixture
 {
     /**
-     * Create a temporary SQLite database with the opencode session and part
-     * tables seeded with the given rows.
+     * Create a temporary SQLite database with the opencode session, message and
+     * part tables seeded with the given rows.
+     *
+     * Parts may reference a message row via message_id; rows without one are
+     * left null so existing tests keep working unchanged.
      *
      * @param  array<int, array<string, mixed>>  $sessions
      * @param  array<int, array<string, mixed>>  $parts
+     * @param  array<int, array<string, mixed>>  $messages
      */
-    public static function create(array $sessions = [], array $parts = []): string
+    public static function create(array $sessions = [], array $parts = [], array $messages = []): string
     {
         $path = tempnam(sys_get_temp_dir(), 'opencode_store_');
 
@@ -41,8 +45,18 @@ class OpencodeStoreFixture
             );
             SQL);
         $pdo->exec(<<<'SQL'
+            CREATE TABLE message (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                time_created INTEGER NOT NULL,
+                time_updated INTEGER NOT NULL,
+                data TEXT NOT NULL
+            );
+            SQL);
+        $pdo->exec(<<<'SQL'
             CREATE TABLE part (
                 id TEXT PRIMARY KEY,
+                message_id TEXT,
                 session_id TEXT NOT NULL,
                 time_created INTEGER NOT NULL,
                 time_updated INTEGER NOT NULL,
@@ -64,11 +78,24 @@ class OpencodeStoreFixture
             ]);
         }
 
-        $partStatement = $pdo->prepare('INSERT INTO part (id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?)');
+        $messageStatement = $pdo->prepare('INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?)');
+
+        foreach ($messages as $message) {
+            $messageStatement->execute([
+                $message['id'],
+                $message['session_id'],
+                $message['time_created'],
+                $message['time_updated'],
+                $message['data'],
+            ]);
+        }
+
+        $partStatement = $pdo->prepare('INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?, ?)');
 
         foreach ($parts as $part) {
             $partStatement->execute([
                 $part['id'],
+                $part['message_id'] ?? null,
                 $part['session_id'],
                 $part['time_created'],
                 $part['time_updated'],

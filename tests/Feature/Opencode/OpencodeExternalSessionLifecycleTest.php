@@ -15,6 +15,7 @@ use App\Services\Opencode\OpencodeNotifier;
 use App\Services\Opencode\OpencodeSessionParser;
 use App\Services\Opencode\OpencodeSessionStore;
 use App\Services\Opencode\OpencodeSessionWatcher;
+use Illuminate\Support\Carbon;
 use Laravel\Ai\Tools\Request;
 use Tests\Feature\Opencode\Support\FakeOpencodeSessionManager;
 use Tests\Support\OpencodeStoreFixture;
@@ -134,6 +135,8 @@ beforeEach(function () {
 
 afterEach(function () {
     OpencodeStoreFixture::cleanup();
+
+    Carbon::setTestNow(null);
 });
 
 test('walks the full external session lifecycle: boot report, question turns, finish, bot work, dismissal and reactivation', function () {
@@ -239,11 +242,27 @@ test('walks the full external session lifecycle: boot report, question turns, fi
         ->and($messages[2]['text'])->toContain('¿Confirmas la ruta del proyecto?');
 
     // ---------------------------------------------------------------------
-    // Phase 3 - Reliable finish: working -> stopped notifies 'finished'.
+    // Phase 3 - Reliable finish: working -> stopped confirms 'finished' only
+    // after the 3-minute idle confirmation window.
     // ---------------------------------------------------------------------
     externalLifecycleAppendPart($path, externalLifecycleStepFinishPart('part_finish', $sessionId, now()->addSeconds(70)->getTimestampMs()));
 
     $manager->conversation = externalLifecycleTranscript('The auth module was refactored.');
+
+    // The first observation of the stop only promotes the watch to a
+    // 'stopping' candidate: the session just went idle, so its activity is
+    // still inside the 3-minute confirmation window.
+    $watcher->check();
+
+    expect($messages)->toHaveCount(3);
+
+    $watch->refresh();
+
+    expect($watch->last_seen_status)->toBe('stopping');
+
+    // The finish is confirmed only once the session has stayed idle past the
+    // window: advance the clock and re-inspect the same persisted candidate.
+    Carbon::setTestNow(now()->addMinutes(6));
 
     $watcher->check();
 

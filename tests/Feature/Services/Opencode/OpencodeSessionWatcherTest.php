@@ -51,6 +51,15 @@ function sessionWatcherOld(): int
 }
 
 /**
+ * Epoch milliseconds for a session idle long enough for the watcher to
+ * confirm its finish (past the 3-minute confirmation window).
+ */
+function sessionWatcherConfirming(): int
+{
+    return now()->subMinutes(4)->getTimestampMs();
+}
+
+/**
  * A default session state (idle, recently active, with parts, in the allowed
  * project), merged with the given overrides.
  *
@@ -274,7 +283,7 @@ test('notifies finished when a session transitions from working to idle', functi
 
     $messages = [];
     $service = sessionWatcherService(
-        sessions: [['id' => 'ses_work', 'title' => 'Build feature', 'directory' => '/home/junior/Projects/DevWarden', 'time_updated' => sessionWatcherFresh()]],
+        sessions: [['id' => 'ses_work', 'title' => 'Build feature', 'directory' => '/home/junior/Projects/DevWarden', 'time_updated' => sessionWatcherConfirming()]],
         conversations: ['ses_work' => sessionWatcherTranscript('The feature is done.')],
         messages: $messages,
     );
@@ -306,7 +315,7 @@ test('notifies finished with the previous real assistant text when the last assi
 
     $messages = [];
     $service = sessionWatcherService(
-        sessions: [['id' => 'ses_no_content', 'title' => 'Deploy task', 'directory' => '/home/junior/Projects/DevWarden', 'time_updated' => sessionWatcherFresh()]],
+        sessions: [['id' => 'ses_no_content', 'title' => 'Deploy task', 'directory' => '/home/junior/Projects/DevWarden', 'time_updated' => sessionWatcherConfirming()]],
         conversations: [
             'ses_no_content' => "--- Message 1 [user] ---\n"
                 ."Go.\n\n"
@@ -346,7 +355,7 @@ test('sends the finished message when the session ends with a rhetorical questio
 
     $messages = [];
     $service = sessionWatcherService(
-        sessions: [['id' => 'ses_q', 'title' => 'Ask me', 'directory' => '/home/junior/Projects/DevWarden', 'time_updated' => sessionWatcherFresh()]],
+        sessions: [['id' => 'ses_q', 'title' => 'Ask me', 'directory' => '/home/junior/Projects/DevWarden', 'time_updated' => sessionWatcherConfirming()]],
         conversations: ['ses_q' => sessionWatcherTranscript('¿Confirmas la ruta del proyecto?')],
         messages: $messages,
     );
@@ -378,7 +387,7 @@ test('sends the finished message when a session ends on a rhetorical trailing qu
 
     $messages = [];
     $service = sessionWatcherService(
-        sessions: [['id' => 'ses_retro', 'title' => 'Retro end', 'directory' => '/home/junior/Projects/DevWarden', 'time_updated' => sessionWatcherFresh()]],
+        sessions: [['id' => 'ses_retro', 'title' => 'Retro end', 'directory' => '/home/junior/Projects/DevWarden', 'time_updated' => sessionWatcherConfirming()]],
         conversations: ['ses_retro' => sessionWatcherTranscript('¿Procedemos con algo concreto, o era solo la prueba?')],
         messages: $messages,
     );
@@ -412,7 +421,7 @@ test('notifies question when the session has a pending permission', function () 
 
     $messages = [];
     $service = sessionWatcherService(
-        sessions: [['id' => 'ses_perm', 'title' => 'Needs permission', 'directory' => '/home/junior/Projects/DevWarden', 'time_updated' => sessionWatcherFresh()]],
+        sessions: [['id' => 'ses_perm', 'title' => 'Needs permission', 'directory' => '/home/junior/Projects/DevWarden', 'time_updated' => sessionWatcherConfirming()]],
         conversations: ['ses_perm' => sessionWatcherTranscript('Waiting on you.')],
         permissions: [
             ['sessionId' => 'ses_perm', 'permissionId' => 'perm_1', 'text' => 'run command `ls`'],
@@ -648,7 +657,7 @@ test('re-activates a stopped notified session that goes back to working and stop
     expect(OpencodeSessionWatch::where('session_id', 'ses_again')->first()->last_seen_status)->toBe('working');
 
     $service = sessionWatcherService(
-        sessions: [['id' => 'ses_again', 'title' => 'Round two', 'directory' => '/home/junior/Projects/DevWarden', 'time_updated' => sessionWatcherFresh()]],
+        sessions: [['id' => 'ses_again', 'title' => 'Round two', 'directory' => '/home/junior/Projects/DevWarden', 'time_updated' => sessionWatcherConfirming()]],
         conversations: ['ses_again' => sessionWatcherTranscript('Part two done.')],
         messages: $messages,
     );
@@ -861,7 +870,7 @@ test('keeps the previous status when the notification fails so it is retried nex
 
     $messages = [];
     $service = sessionWatcherService(
-        sessions: [['id' => 'ses_retry', 'title' => 'Retry me', 'directory' => '/home/junior/Projects/DevWarden', 'time_updated' => sessionWatcherFresh()]],
+        sessions: [['id' => 'ses_retry', 'title' => 'Retry me', 'directory' => '/home/junior/Projects/DevWarden', 'time_updated' => sessionWatcherConfirming()]],
         conversations: ['ses_retry' => sessionWatcherTranscript('Done.')],
         onNotify: fn () => false,
         messages: $messages,
@@ -890,7 +899,7 @@ test('retries a failed notification on the next tick and marks the session stopp
     $messages = [];
     $shouldFail = true;
     $service = sessionWatcherService(
-        sessions: [['id' => 'ses_retry_ok', 'title' => 'Retry then win', 'directory' => '/home/junior/Projects/DevWarden', 'time_updated' => sessionWatcherFresh()]],
+        sessions: [['id' => 'ses_retry_ok', 'title' => 'Retry then win', 'directory' => '/home/junior/Projects/DevWarden', 'time_updated' => sessionWatcherConfirming()]],
         conversations: ['ses_retry_ok' => sessionWatcherTranscript('Done.')],
         onNotify: function () use (&$shouldFail): bool {
             return ! $shouldFail;
@@ -929,7 +938,7 @@ test('does not re-notify a finished session on a later tick with the same stoppe
 
     $messages = [];
     $service = sessionWatcherService(
-        sessions: [['id' => 'ses_q_once', 'title' => 'Ask once', 'directory' => '/home/junior/Projects/DevWarden', 'time_updated' => sessionWatcherFresh()]],
+        sessions: [['id' => 'ses_q_once', 'title' => 'Ask once', 'directory' => '/home/junior/Projects/DevWarden', 'time_updated' => sessionWatcherConfirming()]],
         conversations: ['ses_q_once' => sessionWatcherTranscript('¿Confirmas la ruta del proyecto?')],
         messages: $messages,
     );
@@ -991,7 +1000,7 @@ test('prefers a chat inside allowed_user_ids over a newer stale conversation', f
 
     $messages = [];
     $service = sessionWatcherService(
-        sessions: [['id' => 'ses_chatpick', 'title' => 'Chat pick', 'directory' => '/home/junior/Projects/DevWarden', 'time_updated' => sessionWatcherFresh()]],
+        sessions: [['id' => 'ses_chatpick', 'title' => 'Chat pick', 'directory' => '/home/junior/Projects/DevWarden', 'time_updated' => sessionWatcherConfirming()]],
         conversations: ['ses_chatpick' => sessionWatcherTranscript('Done.')],
         messages: $messages,
     );
@@ -1020,7 +1029,7 @@ test('falls back to the latest owner conversation when allowed_user_ids is empty
 
     $messages = [];
     $service = sessionWatcherService(
-        sessions: [['id' => 'ses_fallback', 'title' => 'Fallback', 'directory' => '/home/junior/Projects/DevWarden', 'time_updated' => sessionWatcherFresh()]],
+        sessions: [['id' => 'ses_fallback', 'title' => 'Fallback', 'directory' => '/home/junior/Projects/DevWarden', 'time_updated' => sessionWatcherConfirming()]],
         conversations: ['ses_fallback' => sessionWatcherTranscript('Done.')],
         messages: $messages,
     );
@@ -2065,7 +2074,7 @@ test('notifies finished when an interactive session drops its live running part'
     $messages = [];
     $service = sessionWatcherService(
         sessions: [
-            ['id' => 'ses_zombie', 'title' => 'Interactive task', 'directory' => '/home/junior/Projects/DevWarden', 'time_updated' => sessionWatcherFresh()],
+            ['id' => 'ses_zombie', 'title' => 'Interactive task', 'directory' => '/home/junior/Projects/DevWarden', 'time_updated' => sessionWatcherConfirming()],
         ],
         conversations: ['ses_zombie' => sessionWatcherTranscript('The interactive task finished.')],
         messages: $messages,
@@ -2120,7 +2129,7 @@ test('notifies a pending-permission session with its question options as plain t
 
     $messages = [];
     $service = sessionWatcherService(
-        sessions: [['id' => 'ses_finished_opts', 'title' => 'Ask with options', 'directory' => '/home/junior/Projects/DevWarden', 'time_updated' => sessionWatcherFresh()]],
+        sessions: [['id' => 'ses_finished_opts', 'title' => 'Ask with options', 'directory' => '/home/junior/Projects/DevWarden', 'time_updated' => sessionWatcherConfirming()]],
         conversations: ['ses_finished_opts' => sessionWatcherTranscript('¿Confirmas la ruta del proyecto?')],
         permissions: [
             ['sessionId' => 'ses_finished_opts', 'permissionId' => 'perm_1', 'text' => 'run command `ls`'],
@@ -2215,7 +2224,7 @@ test('lists every question of a pending-permission session with its lettered opt
 
     $messages = [];
     $service = sessionWatcherService(
-        sessions: [['id' => 'ses_multi_opts', 'title' => 'Multi question', 'directory' => '/home/junior/Projects/DevWarden', 'time_updated' => sessionWatcherFresh()]],
+        sessions: [['id' => 'ses_multi_opts', 'title' => 'Multi question', 'directory' => '/home/junior/Projects/DevWarden', 'time_updated' => sessionWatcherConfirming()]],
         conversations: ['ses_multi_opts' => sessionWatcherTranscript('¿Elige opciones?')],
         permissions: [
             ['sessionId' => 'ses_multi_opts', 'permissionId' => 'perm_1', 'text' => 'run command `ls`'],
@@ -2257,4 +2266,321 @@ test('lists every question of a pending-permission session with its lettered opt
 
     expect($watch->last_seen_status)->toBe('stopped')
         ->and($watch->last_notified_event)->toBe('question');
+});
+
+test('does not notify during a thinking gap and clears the candidate on a resume', function () {
+    $chatId = sessionWatcherOwnerChat();
+    OpencodeSessionWatch::factory()->create([
+        'session_id' => 'ses_gap',
+        'title' => 'Gap session',
+        'chat_id' => $chatId,
+        'last_seen_status' => 'working',
+    ]);
+
+    $messages = [];
+    $service = sessionWatcherService(
+        sessions: [['id' => 'ses_gap', 'title' => 'Gap session', 'directory' => '/home/junior/Projects/DevWarden', 'time_updated' => sessionWatcherFresh()]],
+        conversations: ['ses_gap' => sessionWatcherTranscript('Thinking between tool calls...')],
+        messages: $messages,
+    );
+
+    // First tick lands inside the thinking gap: no running part but very recent
+    // activity, so the session only becomes a 'stopping' candidate.
+    $service->check();
+
+    expect($messages)->toBeEmpty();
+
+    $watch = OpencodeSessionWatch::where('session_id', 'ses_gap')->first();
+
+    expect($watch->last_seen_status)->toBe('stopping');
+
+    // The session resumes with a running part: the candidate is discarded
+    // silently, no "terminó" was ever sent.
+    $service = sessionWatcherService(
+        sessions: [['id' => 'ses_gap', 'title' => 'Gap session', 'directory' => '/home/junior/Projects/DevWarden', 'time_updated' => sessionWatcherFresh()]],
+        states: ['ses_gap' => sessionWatcherState(['has_running_part' => true])],
+        conversations: ['ses_gap' => sessionWatcherTranscript('Thinking between tool calls...')],
+        messages: $messages,
+    );
+
+    $service->check();
+
+    expect($messages)->toBeEmpty();
+
+    $watch->refresh();
+
+    expect($watch->last_seen_status)->toBe('working');
+});
+
+test('treats a pause while the user composes an answer as a candidate, not a finish', function () {
+    $chatId = sessionWatcherOwnerChat();
+    OpencodeSessionWatch::factory()->create([
+        'session_id' => 'ses_pause',
+        'title' => 'Paused on question',
+        'chat_id' => $chatId,
+        'last_seen_status' => 'working',
+        'last_notified_event' => 'question',
+        'notified_at' => now()->subMinute(),
+    ]);
+
+    $messages = [];
+    $service = sessionWatcherService(
+        sessions: [['id' => 'ses_pause', 'title' => 'Paused on question', 'directory' => '/home/junior/Projects/DevWarden', 'time_updated' => sessionWatcherFresh()]],
+        conversations: ['ses_pause' => sessionWatcherTranscript('¿Confirmas la ruta?')],
+        messages: $messages,
+    );
+
+    // The question was answered in the TUI and the user is composing the next
+    // message: recent activity means the stop is only a candidate.
+    $service->check();
+
+    expect($messages)->toBeEmpty();
+
+    $watch = OpencodeSessionWatch::where('session_id', 'ses_pause')->first();
+
+    expect($watch->last_seen_status)->toBe('stopping');
+
+    // The user resumes: a running part returns and the candidate is discarded.
+    $service = sessionWatcherService(
+        sessions: [['id' => 'ses_pause', 'title' => 'Paused on question', 'directory' => '/home/junior/Projects/DevWarden', 'time_updated' => sessionWatcherFresh()]],
+        states: ['ses_pause' => sessionWatcherState(['has_running_part' => true])],
+        messages: $messages,
+    );
+
+    $service->check();
+
+    expect($messages)->toBeEmpty();
+
+    $watch->refresh();
+
+    expect($watch->last_seen_status)->toBe('working');
+});
+
+test('confirms a genuine finish only after the session has stayed idle and never re-notifies', function () {
+    $chatId = sessionWatcherOwnerChat();
+    OpencodeSessionWatch::factory()->create([
+        'session_id' => 'ses_real_finish',
+        'title' => 'Real finish',
+        'chat_id' => $chatId,
+        'last_seen_status' => 'working',
+    ]);
+
+    $messages = [];
+    $service = sessionWatcherService(
+        sessions: [['id' => 'ses_real_finish', 'title' => 'Real finish', 'directory' => '/home/junior/Projects/DevWarden', 'time_updated' => sessionWatcherFresh()]],
+        conversations: ['ses_real_finish' => sessionWatcherTranscript('Everything is done.')],
+        messages: $messages,
+    );
+
+    // First stop observation: candidate, no notification.
+    $service->check();
+
+    expect($messages)->toBeEmpty();
+
+    $watch = OpencodeSessionWatch::where('session_id', 'ses_real_finish')->first();
+
+    expect($watch->last_seen_status)->toBe('stopping');
+
+    // A later tick sees the same persisted watch with the session idle past
+    // the confirmation window: exactly one finished notification.
+    $service = sessionWatcherService(
+        sessions: [['id' => 'ses_real_finish', 'title' => 'Real finish', 'directory' => '/home/junior/Projects/DevWarden', 'time_updated' => sessionWatcherConfirming()]],
+        conversations: ['ses_real_finish' => sessionWatcherTranscript('Everything is done.')],
+        messages: $messages,
+    );
+
+    $service->check();
+
+    expect($messages)->toHaveCount(1)
+        ->and($messages[0]['text'])->toContain('La sesión de opencode "Real finish" terminó.');
+
+    $watch->refresh();
+
+    expect($watch->last_seen_status)->toBe('stopped')
+        ->and($watch->last_notified_event)->toBe('finished')
+        ->and($watch->notified_at)->not->toBeNull();
+
+    // A further tick never re-notifies the finished session.
+    $service->check();
+
+    expect($messages)->toHaveCount(1);
+});
+
+test('does not confirm the finish before the 3-minute window elapses', function () {
+    $chatId = sessionWatcherOwnerChat();
+    OpencodeSessionWatch::factory()->create([
+        'session_id' => 'ses_boundary',
+        'title' => 'Boundary',
+        'chat_id' => $chatId,
+        'last_seen_status' => 'stopping',
+    ]);
+
+    $messages = [];
+    $service = sessionWatcherService(
+        sessions: [['id' => 'ses_boundary', 'title' => 'Boundary', 'directory' => '/home/junior/Projects/DevWarden', 'time_updated' => now()->subMinutes(3)->addSeconds(30)->getTimestampMs()]],
+        conversations: ['ses_boundary' => sessionWatcherTranscript('Done.')],
+        messages: $messages,
+    );
+
+    // 2m30s idle: still inside the window, the candidate stays 'stopping'.
+    $service->check();
+
+    expect($messages)->toBeEmpty();
+
+    $watch = OpencodeSessionWatch::where('session_id', 'ses_boundary')->first();
+
+    expect($watch->last_seen_status)->toBe('stopping');
+
+    // 3m30s idle: the window has elapsed, the finish is confirmed.
+    $service = sessionWatcherService(
+        sessions: [['id' => 'ses_boundary', 'title' => 'Boundary', 'directory' => '/home/junior/Projects/DevWarden', 'time_updated' => now()->subMinutes(3)->subSeconds(30)->getTimestampMs()]],
+        conversations: ['ses_boundary' => sessionWatcherTranscript('Done.')],
+        messages: $messages,
+    );
+
+    $service->check();
+
+    expect($messages)->toHaveCount(1)
+        ->and($messages[0]['text'])->toContain('terminó.');
+
+    $watch->refresh();
+
+    expect($watch->last_seen_status)->toBe('stopped')
+        ->and($watch->last_notified_event)->toBe('finished');
+});
+
+test('confirms the finish at exactly the 3-minute boundary of the confirmation window', function () {
+    $chatId = sessionWatcherOwnerChat();
+    OpencodeSessionWatch::factory()->create([
+        'session_id' => 'ses_exact_boundary',
+        'title' => 'Exact boundary',
+        'chat_id' => $chatId,
+        'last_seen_status' => 'stopping',
+    ]);
+
+    $messages = [];
+    $service = sessionWatcherService(
+        sessions: [['id' => 'ses_exact_boundary', 'title' => 'Exact boundary', 'directory' => '/home/junior/Projects/DevWarden', 'time_updated' => now()->subMinutes(3)->getTimestampMs()]],
+        conversations: ['ses_exact_boundary' => sessionWatcherTranscript('Done.')],
+        messages: $messages,
+    );
+
+    // 3:00 idle exactly: Carbon's diffInMinutes returns the fractional 3.0,
+    // which satisfies the >= FINISH_CONFIRM_MINUTES guard at the boundary.
+    $service->check();
+
+    expect($messages)->toHaveCount(1)
+        ->and($messages[0]['chat_id'])->toBe($chatId)
+        ->and($messages[0]['text'])->toContain('La sesión de opencode "Exact boundary" terminó.');
+
+    $watch = OpencodeSessionWatch::where('session_id', 'ses_exact_boundary')->first();
+
+    expect($watch->last_seen_status)->toBe('stopped')
+        ->and($watch->last_notified_event)->toBe('finished')
+        ->and($watch->notified_at)->not->toBeNull();
+});
+
+test('confirms a pending-permission session from a stopping candidate as a question, not a finish', function () {
+    $chatId = sessionWatcherOwnerChat();
+    OpencodeSessionWatch::factory()->create([
+        'session_id' => 'ses_perm_confirm',
+        'title' => 'Permission confirm',
+        'chat_id' => $chatId,
+        'last_seen_status' => 'stopping',
+    ]);
+
+    $messages = [];
+    $service = sessionWatcherService(
+        sessions: [['id' => 'ses_perm_confirm', 'title' => 'Permission confirm', 'directory' => '/home/junior/Projects/DevWarden', 'time_updated' => sessionWatcherConfirming()]],
+        conversations: ['ses_perm_confirm' => sessionWatcherTranscript('Waiting on you.')],
+        permissions: [
+            ['sessionId' => 'ses_perm_confirm', 'permissionId' => 'perm_1', 'text' => 'run command `ls`'],
+        ],
+        messages: $messages,
+    );
+
+    $service->check();
+
+    expect($messages)->toHaveCount(1)
+        ->and($messages[0]['chat_id'])->toBe($chatId)
+        ->and($messages[0]['text'])->toContain('La sesión de opencode "Permission confirm" tiene preguntas.')
+        ->and($messages[0]['text'])->toContain('Waiting on you.')
+        ->and($messages[0]['text'])->not->toContain('terminó.');
+
+    $watch = OpencodeSessionWatch::where('session_id', 'ses_perm_confirm')->first();
+
+    expect($watch->last_seen_status)->toBe('stopped')
+        ->and($watch->last_notified_event)->toBe('question')
+        ->and($watch->notified_at)->not->toBeNull();
+});
+
+test('retries a failed finish confirmation on the next tick from a stopping candidate', function () {
+    $chatId = sessionWatcherOwnerChat();
+    OpencodeSessionWatch::factory()->create([
+        'session_id' => 'ses_confirm_retry',
+        'title' => 'Confirm retry',
+        'chat_id' => $chatId,
+        'last_seen_status' => 'stopping',
+    ]);
+
+    $messages = [];
+    $shouldFail = true;
+    $service = sessionWatcherService(
+        sessions: [['id' => 'ses_confirm_retry', 'title' => 'Confirm retry', 'directory' => '/home/junior/Projects/DevWarden', 'time_updated' => sessionWatcherConfirming()]],
+        conversations: ['ses_confirm_retry' => sessionWatcherTranscript('Done.')],
+        onNotify: function () use (&$shouldFail): bool {
+            return ! $shouldFail;
+        },
+        messages: $messages,
+    );
+
+    // Confirm condition met but the send fails: the candidate is preserved so
+    // the same notification is retried next tick.
+    $service->check();
+
+    expect($messages)->toHaveCount(1);
+
+    $watch = OpencodeSessionWatch::where('session_id', 'ses_confirm_retry')->first();
+
+    expect($watch->last_seen_status)->toBe('stopping');
+
+    $shouldFail = false;
+    $service->check();
+
+    expect($messages)->toHaveCount(2);
+
+    $watch->refresh();
+
+    expect($watch->last_seen_status)->toBe('stopped')
+        ->and($watch->last_notified_event)->toBe('finished')
+        ->and($watch->notified_at)->not->toBeNull();
+});
+
+test('a fresh stopped session is only registered, never confirmed or notified', function () {
+    $chatId = sessionWatcherOwnerChat();
+    OpencodeSessionWatch::factory()->create([
+        'session_id' => 'ses_fresh_stopped',
+        'title' => 'Found stopped',
+        'chat_id' => $chatId,
+        'last_seen_status' => 'unknown',
+        'checked_at' => now()->subMinutes(30),
+    ]);
+
+    $messages = [];
+    $service = sessionWatcherService(
+        sessions: [['id' => 'ses_fresh_stopped', 'title' => 'Found stopped', 'directory' => '/home/junior/Projects/DevWarden', 'time_updated' => sessionWatcherConfirming()]],
+        conversations: ['ses_fresh_stopped' => sessionWatcherTranscript('Old work.')],
+        messages: $messages,
+    );
+
+    $service->check();
+    $service->check();
+
+    expect($messages)->toBeEmpty();
+
+    $watch = OpencodeSessionWatch::where('session_id', 'ses_fresh_stopped')->first();
+
+    expect($watch->last_seen_status)->toBe('stopped')
+        ->and($watch->last_notified_event)->toBeNull()
+        ->and($watch->notified_at)->toBeNull();
 });

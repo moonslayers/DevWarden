@@ -807,3 +807,299 @@ test('returns empty results without throwing when the database file does not exi
         'last_turn_tool' => null,
     ]);
 });
+
+/**
+ * Build a text part row with a custom message and optional message reference.
+ */
+function opencodeRichTextPart(string $id, string $sessionId, int $timeCreated, string $text, ?string $messageId = null): array
+{
+    return [
+        'id' => $id,
+        'session_id' => $sessionId,
+        'time_created' => $timeCreated,
+        'time_updated' => $timeCreated,
+        'message_id' => $messageId,
+        'data' => json_encode(['type' => 'text', 'text' => $text]),
+    ];
+}
+
+/**
+ * Build a message row whose data carries the message role.
+ */
+function opencodeMessageRow(string $id, string $sessionId, int $timeCreated, string $role): array
+{
+    return [
+        'id' => $id,
+        'session_id' => $sessionId,
+        'time_created' => $timeCreated,
+        'time_updated' => $timeCreated,
+        'data' => json_encode(['role' => $role]),
+    ];
+}
+
+/**
+ * Build a part row whose data is one of the excluded noise types.
+ */
+function opencodeNoisePart(string $id, string $sessionId, int $timeCreated, string $type): array
+{
+    return [
+        'id' => $id,
+        'session_id' => $sessionId,
+        'time_created' => $timeCreated,
+        'time_updated' => $timeCreated,
+        'data' => json_encode(['type' => $type]),
+    ];
+}
+
+/**
+ * Build a part row whose data spawns a sub-agent.
+ */
+function opencodeAgentPart(string $id, string $sessionId, int $timeCreated, string $name): array
+{
+    return [
+        'id' => $id,
+        'session_id' => $sessionId,
+        'time_created' => $timeCreated,
+        'time_updated' => $timeCreated,
+        'data' => json_encode(['type' => 'agent', 'name' => $name]),
+    ];
+}
+
+/**
+ * Build a tool part whose data is a task tool delegating to a sub-session.
+ */
+function opencodeTaskPart(string $id, string $sessionId, int $timeCreated, string $subSessionId): array
+{
+    return [
+        'id' => $id,
+        'session_id' => $sessionId,
+        'time_created' => $timeCreated,
+        'time_updated' => $timeCreated,
+        'data' => json_encode([
+            'type' => 'tool',
+            'tool' => 'task',
+            'state' => [
+                'status' => 'completed',
+                'input' => ['description' => 'Do the thing', 'prompt' => 'Do the thing well.'],
+                'metadata' => ['sessionId' => $subSessionId],
+            ],
+        ]),
+    ];
+}
+
+test('recentParts with direction last returns the most recent parts in chronological order', function () {
+    $store = new OpencodeSessionStore(OpencodeStoreFixture::create(
+        sessions: [
+            ['id' => 'ses_win', 'title' => 'Window', 'directory' => '/projects/a', 'time_created' => 1000, 'time_updated' => 6000, 'time_archived' => null],
+        ],
+        parts: [
+            opencodeRichTextPart('part_1', 'ses_win', 1000, 'alpha'),
+            opencodeRichTextPart('part_2', 'ses_win', 2000, 'beta'),
+            opencodeRichTextPart('part_3', 'ses_win', 3000, 'gamma'),
+            opencodeRichTextPart('part_4', 'ses_win', 4000, 'delta'),
+            opencodeRichTextPart('part_5', 'ses_win', 5000, 'epsilon'),
+        ],
+    ));
+
+    $parts = $store->recentParts('ses_win', limit: 3);
+
+    expect(array_column($parts, 'time_created'))->toBe([3000, 4000, 5000]);
+    expect(array_column($parts, 'text'))->toBe(['gamma', 'delta', 'epsilon']);
+});
+
+test('recentParts with direction first returns the oldest parts in chronological order', function () {
+    $store = new OpencodeSessionStore(OpencodeStoreFixture::create(
+        sessions: [
+            ['id' => 'ses_win', 'title' => 'Window', 'directory' => '/projects/a', 'time_created' => 1000, 'time_updated' => 6000, 'time_archived' => null],
+        ],
+        parts: [
+            opencodeRichTextPart('part_1', 'ses_win', 1000, 'alpha'),
+            opencodeRichTextPart('part_2', 'ses_win', 2000, 'beta'),
+            opencodeRichTextPart('part_3', 'ses_win', 3000, 'gamma'),
+            opencodeRichTextPart('part_4', 'ses_win', 4000, 'delta'),
+            opencodeRichTextPart('part_5', 'ses_win', 5000, 'epsilon'),
+        ],
+    ));
+
+    $parts = $store->recentParts('ses_win', limit: 3, direction: 'first');
+
+    expect(array_column($parts, 'time_created'))->toBe([1000, 2000, 3000]);
+    expect(array_column($parts, 'text'))->toBe(['alpha', 'beta', 'gamma']);
+});
+
+test('recentParts excludes reasoning, step-start, step-finish and compaction parts', function () {
+    $store = new OpencodeSessionStore(OpencodeStoreFixture::create(
+        sessions: [
+            ['id' => 'ses_noise', 'title' => 'Noise', 'directory' => '/projects/a', 'time_created' => 1000, 'time_updated' => 6000, 'time_archived' => null],
+        ],
+        parts: [
+            opencodeNoisePart('noise_1', 'ses_noise', 1100, 'reasoning'),
+            opencodeRichTextPart('part_1', 'ses_noise', 1200, 'alpha'),
+            opencodeNoisePart('noise_2', 'ses_noise', 1300, 'step-start'),
+            opencodeNoisePart('noise_3', 'ses_noise', 1400, 'step-finish'),
+            opencodeRichTextPart('part_2', 'ses_noise', 1500, 'beta'),
+            opencodeNoisePart('noise_4', 'ses_noise', 1600, 'compaction'),
+            opencodeRichTextPart('part_3', 'ses_noise', 1700, 'gamma'),
+        ],
+    ));
+
+    $parts = $store->recentParts('ses_noise', limit: 10);
+
+    expect($parts)->toHaveCount(3);
+    expect(array_column($parts, 'text'))->toBe(['alpha', 'beta', 'gamma']);
+});
+
+test('recentParts resolves the role from the joined message row', function () {
+    $store = new OpencodeSessionStore(OpencodeStoreFixture::create(
+        sessions: [
+            ['id' => 'ses_roles', 'title' => 'Roles', 'directory' => '/projects/a', 'time_created' => 1000, 'time_updated' => 3000, 'time_archived' => null],
+        ],
+        messages: [
+            opencodeMessageRow('msg_assistant', 'ses_roles', 1000, 'assistant'),
+            opencodeMessageRow('msg_user', 'ses_roles', 2000, 'user'),
+        ],
+        parts: [
+            opencodeRichTextPart('part_1', 'ses_roles', 1500, 'first reply', messageId: 'msg_assistant'),
+            opencodeRichTextPart('part_2', 'ses_roles', 2500, 'user input', messageId: 'msg_user'),
+        ],
+    ));
+
+    $parts = $store->recentParts('ses_roles');
+
+    expect(array_column($parts, 'role'))->toBe(['assistant', 'user']);
+});
+
+test('recentParts keeps a part without a message row with a null role', function () {
+    $store = new OpencodeSessionStore(OpencodeStoreFixture::create(
+        sessions: [
+            ['id' => 'ses_lonely', 'title' => 'Lonely', 'directory' => '/projects/a', 'time_created' => 1000, 'time_updated' => 4000, 'time_archived' => null],
+        ],
+        messages: [
+            opencodeMessageRow('msg_attached', 'ses_lonely', 1000, 'assistant'),
+        ],
+        parts: [
+            opencodeRichTextPart('part_1', 'ses_lonely', 1500, 'with message', messageId: 'msg_attached'),
+            opencodeRichTextPart('part_2', 'ses_lonely', 2500, 'without message'),
+        ],
+    ));
+
+    $parts = $store->recentParts('ses_lonely');
+
+    expect($parts)->toHaveCount(2);
+    expect($parts[0]['role'])->toBe('assistant');
+    expect($parts[1]['role'])->toBeNull();
+});
+
+test('recentParts caps long text, input and output fields', function () {
+    $hugeOutput = str_repeat('y', 5000);
+
+    $store = new OpencodeSessionStore(OpencodeStoreFixture::create(
+        sessions: [
+            ['id' => 'ses_huge', 'title' => 'Huge', 'directory' => '/projects/a', 'time_created' => 1000, 'time_updated' => 4000, 'time_archived' => null],
+        ],
+        parts: [
+            opencodeRichTextPart('part_1', 'ses_huge', 1000, str_repeat('x', 3000)),
+            opencodeTaskPart('part_2', 'ses_huge', 2000, 'ses_sub'),
+            [
+                'id' => 'part_3',
+                'session_id' => 'ses_huge',
+                'time_created' => 3000,
+                'time_updated' => 3000,
+                'data' => json_encode([
+                    'type' => 'tool',
+                    'tool' => 'bash',
+                    'state' => ['status' => 'completed', 'output' => $hugeOutput],
+                ]),
+            ],
+        ],
+    ));
+
+    $parts = $store->recentParts('ses_huge', limit: 10);
+
+    expect($parts[0]['text'])->toHaveLength(2000);
+    expect($parts[0]['text'])->toBe(substr(str_repeat('x', 3000), 0, 2000));
+    expect($parts[1]['input'])->toContain('description');
+    expect($parts[1]['input'])->not->toContain("\n");
+    expect($parts[2]['output'])->toHaveLength(2000);
+    expect($parts[2]['output'])->toBe(substr($hugeOutput, 0, 2000));
+});
+
+test('recentParts maps tool, status, agent name and sub-session metadata for tool and agent parts', function () {
+    $store = new OpencodeSessionStore(OpencodeStoreFixture::create(
+        sessions: [
+            ['id' => 'ses_agent', 'title' => 'Agent', 'directory' => '/projects/a', 'time_created' => 1000, 'time_updated' => 3000, 'time_archived' => null],
+            ['id' => 'ses_sub', 'title' => 'Sub', 'directory' => '/projects/a', 'time_created' => 500, 'time_updated' => 600, 'time_archived' => null],
+        ],
+        parts: [
+            opencodeAgentPart('part_agent', 'ses_agent', 1000, 'general'),
+            opencodeTaskPart('part_task', 'ses_agent', 2000, 'ses_sub'),
+            opencodeAgentPart('sub_agent', 'ses_sub', 500, 'explore'),
+        ],
+    ));
+
+    $parts = $store->recentParts('ses_agent', limit: 10);
+
+    expect($parts)->toHaveCount(2);
+    expect($parts[0]['type'])->toBe('agent');
+    expect($parts[0]['tool'])->toBeNull();
+    expect($parts[0]['status'])->toBeNull();
+    expect($parts[0]['agent_name'])->toBe('general');
+    expect($parts[0]['sub_session_id'])->toBeNull();
+    expect($parts[1]['type'])->toBe('tool');
+    expect($parts[1]['tool'])->toBe('task');
+    expect($parts[1]['status'])->toBe('completed');
+    expect($parts[1]['agent_name'])->toBe('explore');
+    expect($parts[1]['sub_session_id'])->toBe('ses_sub');
+});
+
+test('recentParts returns an empty array without throwing when the database is missing', function () {
+    $store = new OpencodeSessionStore(sys_get_temp_dir().'/opencode_store_missing_'.uniqid().'.db');
+
+    expect($store->recentParts('ses_unknown'))->toBe([]);
+});
+
+test('recentParts defaults direction to last', function () {
+    $store = new OpencodeSessionStore(OpencodeStoreFixture::create(
+        sessions: [
+            ['id' => 'ses_default', 'title' => 'Default', 'directory' => '/projects/a', 'time_created' => 1000, 'time_updated' => 5000, 'time_archived' => null],
+        ],
+        parts: [
+            opencodeRichTextPart('part_1', 'ses_default', 1000, 'alpha'),
+            opencodeRichTextPart('part_2', 'ses_default', 2000, 'beta'),
+            opencodeRichTextPart('part_3', 'ses_default', 3000, 'gamma'),
+            opencodeRichTextPart('part_4', 'ses_default', 4000, 'delta'),
+            opencodeRichTextPart('part_5', 'ses_default', 5000, 'epsilon'),
+            opencodeRichTextPart('part_6', 'ses_default', 6000, 'zeta'),
+        ],
+    ));
+
+    $parts = $store->recentParts('ses_default');
+
+    expect(array_column($parts, 'text'))->toBe(['beta', 'gamma', 'delta', 'epsilon', 'zeta']);
+});
+
+test('recentParts clamps the limit to its minimum and maximum bounds', function () {
+    $parts = [];
+
+    for ($index = 1; $index <= 55; $index++) {
+        $parts[] = opencodeRichTextPart("part_{$index}", 'ses_clamp', $index * 1000, "text {$index}");
+    }
+
+    $store = new OpencodeSessionStore(OpencodeStoreFixture::create(
+        sessions: [
+            ['id' => 'ses_clamp', 'title' => 'Clamp', 'directory' => '/projects/a', 'time_created' => 1000, 'time_updated' => 56000, 'time_archived' => null],
+        ],
+        parts: $parts,
+    ));
+
+    $minResult = $store->recentParts('ses_clamp', limit: 0);
+
+    expect($minResult)->toHaveCount(1);
+    expect($minResult[0]['text'])->toBe('text 55');
+
+    $maxResult = $store->recentParts('ses_clamp', limit: 100);
+
+    expect($maxResult)->toHaveCount(50);
+    expect($maxResult[0]['text'])->toBe('text 6');
+    expect($maxResult[49]['text'])->toBe('text 55');
+});

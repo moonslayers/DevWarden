@@ -14,6 +14,7 @@ use App\Ai\Tools\Opencode\OpencodeStartWorkflowTool;
 use App\Ai\Tools\Opencode\OpencodeStopWorkflowTool;
 use App\Ai\Tools\Opencode\OpencodeWorkflowStatusTool;
 use App\Ai\Tools\Opencode\ReactivateSessionTool;
+use App\Ai\Tools\Opencode\ReadSessionTool;
 use App\Ai\Tools\Opencode\SearchSessionsTool;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Laravel\Ai\Contracts\HasTools;
@@ -26,10 +27,10 @@ test('BotAgent implements the HasTools contract', function () {
     expect(BotAgent::class)->toImplement(HasTools::class);
 });
 
-test('tools returns the fourteen AI tools available to the agent', function () {
+test('tools returns the fifteen AI tools available to the agent', function () {
     $tools = iterator_to_array(app(BotAgent::class)->tools());
 
-    expect($tools)->toHaveCount(14)
+    expect($tools)->toHaveCount(15)
         ->and(array_map(fn ($tool): string => $tool::class, $tools))->toBe([
             CurrentDateTool::class,
             DuckDuckGoSearchTool::class,
@@ -45,6 +46,7 @@ test('tools returns the fourteen AI tools available to the agent', function () {
             ReactivateSessionTool::class,
             AbortSessionTool::class,
             SearchSessionsTool::class,
+            ReadSessionTool::class,
         ]);
 });
 
